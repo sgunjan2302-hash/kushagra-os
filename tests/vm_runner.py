@@ -8,10 +8,11 @@ import shutil
 from PIL import Image
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-BUILD_DIR = os.path.join(REPO_ROOT, "build", "v0.1.5")
+raw_iso = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO_ROOT, "build", "v0.1.6", "KushagraOS-44.iso")
+ISO_PATH = os.path.abspath(raw_iso)
+BUILD_DIR = os.path.dirname(ISO_PATH)
 QEMU_DIR = os.path.join(REPO_ROOT, "build", "qemu")
 QEMU_BIN = os.path.join(QEMU_DIR, "qemu-system-x86_64.exe")
-ISO_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(BUILD_DIR, "KushagraOS-44.iso")
 SERIAL_LOG = os.path.join(BUILD_DIR, "serial.log")
 QEMU_PPM = os.path.join(QEMU_DIR, "screen.ppm")
 ARTIFACT_DIR = r"C:\Users\sgunj\.gemini\antigravity\brain\282037fa-b7e1-44d0-be26-2adfcb5e1f34"
@@ -104,7 +105,7 @@ last_snap_time = 0
 snapshots_saved = []
 
 try:
-    while time.time() - start_time < 120:
+    while time.time() - start_time < 150:
         elapsed = int(time.time() - start_time)
 
         # Check if QEMU died
