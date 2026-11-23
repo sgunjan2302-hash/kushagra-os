@@ -5,6 +5,7 @@
 cosign.key
 
 # Build Artifacts & ISOs
+build/
 *.iso
 *.iso-CHECKSUM
 *.tar.gz

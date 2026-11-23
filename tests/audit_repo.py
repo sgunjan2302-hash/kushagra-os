@@ -129,5 +129,26 @@ try:
 except Exception as e:
     record('Titanoboa iso.yaml Contract', 'FAIL', str(e))
 
+# 9. LiveCD Initramfs Dracut Modules Contract
+try:
+    with open('recipes/packages.yml', 'r', encoding='utf-8') as f:
+        pkgs_cfg = yaml.safe_load(f)
+    install_pkgs = pkgs_cfg.get('install', {}).get('packages', [])
+    has_dracut_live = 'dracut-live' in install_pkgs
+
+    has_live_conf = os.path.exists('files/system/etc/dracut.conf.d/livecd.conf')
+    conf_valid = False
+    if has_live_conf:
+        with open('files/system/etc/dracut.conf.d/livecd.conf', 'r', encoding='utf-8') as f:
+            conf_text = f.read()
+            conf_valid = 'dmsquash-live' in conf_text
+
+    if has_dracut_live and conf_valid:
+        record('LiveCD Dracut Modules', 'PASS', 'dracut-live in packages.yml and dmsquash-live in livecd.conf')
+    else:
+        record('LiveCD Dracut Modules', 'FAIL', f'has_dracut_live={has_dracut_live}, conf_valid={conf_valid}')
+except Exception as e:
+    record('LiveCD Dracut Modules', 'FAIL', str(e))
+
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)
 

@@ -28,6 +28,9 @@ install:
     # --- Driverless Printing & Scanning (IPP Everywhere / eSCL) ---
     - ipp-usb
 
+    # --- LiveCD Initramfs & ISO Boot Support ---
+    - dracut-live
+
     # --- Desktop Utilities & Phone Connectivity ---
     - plasma-firewall
     - kde-connect
