@@ -65,9 +65,9 @@ jobs:
           echo "Injecting verified Titanoboa contract files into ${IMAGE_REF}..."
 
           # 1. Stage official Fedora signed UEFI binaries (shim + grub2-efi)
-          mkdir -p /tmp/efi-staging/EFI/fedora /tmp/efi-staging/EFI/BOOT
+          mkdir -p /tmp/efi-staging/boot/efi/EFI/fedora /tmp/efi-staging/boot/efi/EFI/BOOT
           echo "Extracting signed UEFI bootloader binaries via Fedora container..."
-          sudo podman run --rm -v /tmp/efi-staging:/out quay.io/fedora/fedora:latest bash -c '
+          sudo podman run --rm -v /tmp/efi-staging/boot/efi:/out quay.io/fedora/fedora:latest bash -c '
             set -euo pipefail
             dnf install -y shim-x64 grub2-efi-x64
             mkdir -p /out/EFI
@@ -85,10 +85,10 @@ jobs:
             ls -laR /out/EFI
           '
 
-          # 2. Inject iso.yaml and staged EFI directory into the container image
+          # 2. Inject iso.yaml and staged boot/efi directory into the container image
           sudo podman create --name kushagra-iso-patch "${IMAGE_REF}"
           sudo podman cp files/system/usr/lib/bootc-image-builder/iso.yaml kushagra-iso-patch:/usr/lib/bootc-image-builder/iso.yaml
-          sudo podman cp /tmp/efi-staging/EFI kushagra-iso-patch:/boot/efi/EFI
+          sudo podman cp /tmp/efi-staging/boot kushagra-iso-patch:/
           sudo podman commit kushagra-iso-patch "${IMAGE_REF}"
           sudo podman rm -f kushagra-iso-patch
 

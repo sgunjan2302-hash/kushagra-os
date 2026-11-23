@@ -19,17 +19,22 @@ class NoAuthRedirect(urllib.request.HTTPRedirectHandler):
 
 opener = urllib.request.build_opener(NoAuthRedirect)
 
-# Get job ID
 headers = {'User-Agent': 'Mozilla/5.0'}
 if token:
     headers['Authorization'] = f'Bearer {token}'
 
-runs_url = 'https://api.github.com/repos/sgunjan2302-hash/kushagra-os/actions/runs/45175718833/jobs'
+runs_url = 'https://api.github.com/repos/sgunjan2302-hash/kushagra-os/actions/runs'
 req = urllib.request.Request(runs_url, headers=headers)
-jobs = json.loads(opener.open(req).read()).get('jobs', [])
+runs = json.loads(opener.open(req).read()).get('workflow_runs', [])
+iso_runs = [r for r in runs if r.get('name') == 'Build Bootable LiveCD ISO']
+latest = iso_runs[0]
+print(f"=== Fetching logs for Run #{latest.get('run_number')} ({latest.get('id')}) ===")
+
+jreq = urllib.request.Request(latest.get('jobs_url'), headers=headers)
+jobs = json.loads(opener.open(jreq).read()).get('jobs', [])
 job_id = jobs[0]['id']
 
-log_url = f'https://api.github.com/repos/sgunjan2302-hash/kushagra-os/actions/jobs/{job_id}/logs'
+log_url = f"https://api.github.com/repos/sgunjan2302-hash/kushagra-os/actions/jobs/{job_id}/logs"
 lreq = urllib.request.Request(log_url, headers=headers)
 raw_logs = opener.open(lreq).read().decode('utf-8', errors='replace')
 print("=== LOG OUTPUT (Last 4000 characters) ===")
