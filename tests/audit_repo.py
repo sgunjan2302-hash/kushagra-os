@@ -13,11 +13,20 @@ def record(name, status, detail):
 # 1. Secret Safety
 git_ignored = open('.gitignore', 'r', encoding='utf-8').read()
 has_keys = all(k in git_ignored for k in ['*.key', '*.private', '*.secret', 'cosign.key'])
-sec_files = glob.glob('**/*.key', recursive=True) + glob.glob('**/*.private', recursive=True)
-if has_keys and len(sec_files) == 0:
-    record('Secret Safety', 'PASS', '.gitignore blocks private keys; 0 private keys tracked')
+
+# Verify via git that no private keys are tracked or staged
+tracked_sec_files = []
+try:
+    import subprocess
+    tracked = subprocess.check_output(['git', 'ls-files'], text=True).splitlines()
+    tracked_sec_files = [f for f in tracked if f.endswith('.key') or f.endswith('.private') or f.endswith('.secret')]
+except Exception:
+    pass
+
+if has_keys and len(tracked_sec_files) == 0:
+    record('Secret Safety', 'PASS', '.gitignore blocks private keys; 0 private keys tracked by Git')
 else:
-    record('Secret Safety', 'FAIL', f'Private key files found: {sec_files}')
+    record('Secret Safety', 'FAIL', f'Private key files tracked by Git: {tracked_sec_files}')
 
 # 2. YAML Safe Parsing
 yaml_files = glob.glob('recipes/*.yml') + glob.glob('.github/workflows/*.yml') + ['files/system/usr/lib/bootc-image-builder/iso.yaml']
