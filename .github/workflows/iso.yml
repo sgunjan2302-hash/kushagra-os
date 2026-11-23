@@ -105,6 +105,18 @@ jobs:
           image-ref: ghcr.io/${{ github.repository_owner }}/kushagra-os:${{ github.event.inputs.image_tag || '44' }}
           iso-dest: ${{ github.workspace }}/KushagraOS-44.iso
 
+      - name: Stage Final ISO to Workspace
+        run: |
+          ISO_FILE="${{ steps.titanoboa.outputs.iso-dest }}"
+          echo "Titanoboa generated ISO at: $ISO_FILE"
+          if [ -f "$ISO_FILE" ]; then
+            cp -vf "$ISO_FILE" "${{ github.workspace }}/KushagraOS-44.iso"
+          else
+            echo "Searching for generated ISO file..."
+            find /home/runner/work -name "*KushagraOS*.iso" -exec cp -vf {} "${{ github.workspace }}/KushagraOS-44.iso" \;
+          fi
+          ls -lh "${{ github.workspace }}/KushagraOS-44.iso"
+
       - name: Generate SHA256 Checksum
         run: |
           cd "${{ github.workspace }}"
