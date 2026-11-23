@@ -2,6 +2,12 @@ name: Build Bootable LiveCD ISO
 
 on:
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'GHCR image tag to package into LiveCD ISO'
+        required: true
+        default: '44'
+        type: string
   push:
     tags:
       - 'v*'
@@ -9,6 +15,7 @@ on:
 permissions:
   contents: write
   packages: read
+  actions: write
   id-token: write
 
 concurrency:
@@ -19,19 +26,23 @@ jobs:
   build-iso:
     name: Build LiveCD ISO (Titanoboa)
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: read
+      actions: write
+      id-token: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Generate LiveCD ISO with Titanoboa
-        # Uses Titanoboa which reads /usr/lib/bootc-image-builder/iso.yaml baked in image
+        # Uses Titanoboa composite action to build a bootc bootable LiveCD ISO
+        # Configuration contract is baked into the image at /usr/lib/bootc-image-builder/iso.yaml
         uses: ublue-os/titanoboa@main
         id: titanoboa
         with:
-          image_name: kushagra-os
-          image_tag: 44
-          image_repo: ghcr.io/${{ github.repository_owner }}
-          iso_name: KushagraOS-44.iso
+          image-ref: ghcr.io/${{ github.repository_owner }}/kushagra-os:${{ github.event.inputs.image_tag || '44' }}
+          iso-dest: ${{ github.workspace }}/KushagraOS-44.iso
 
       # Fallback Alternative Builder (Non-Live Container Installer):
       # - name: Build Non-Live Installer Fallback
@@ -39,7 +50,7 @@ jobs:
       #   with:
       #     image_name: kushagra-os
       #     image_repo: ghcr.io/${{ github.repository_owner }}
-      #     image_tag: 44
+      #     image_tag: ${{ github.event.inputs.image_tag || '44' }}
       #     iso_name: KushagraOS-44-installer.iso
 
       - name: Generate SHA256 Checksum
@@ -47,14 +58,26 @@ jobs:
           sha256sum KushagraOS-44.iso > KushagraOS-44.iso-CHECKSUM
           cat KushagraOS-44.iso-CHECKSUM
 
+      - name: Upload ISO Artifact to GitHub Actions
+        # Stores the generated ISO directly in GitHub Actions artifacts (supported up to 10 GB per artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: KushagraOS-44-iso
+          path: |
+            ${{ github.workspace }}/KushagraOS-44.iso
+            ${{ github.workspace }}/KushagraOS-44.iso-CHECKSUM
+          retention-days: 3
+          if-no-files-found: error
+
       - name: Upload ISO to Cloudflare R2 ($0 Egress Storage)
-        # Note: GitHub Releases has a 2 GiB per-file hard limit. Full ISOs are uploaded to Cloudflare R2.
-        if: env.R2_ACCOUNT_ID != ''
+        # Cleanly skipped when R2 credentials are not configured in repository secrets
+        if: ${{ env.R2_ACCOUNT_ID != '' && env.R2_BUCKET != '' }}
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          aws s3 cp KushagraOS-44.iso "s3://${{ secrets.R2_BUCKET }}/KushagraOS-44.iso" --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          aws s3 cp KushagraOS-44.iso-CHECKSUM "s3://${{ secrets.R2_BUCKET }}/KushagraOS-44.iso-CHECKSUM" --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp KushagraOS-44.iso "s3://${R2_BUCKET}/KushagraOS-44.iso" --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp KushagraOS-44.iso-CHECKSUM "s3://${R2_BUCKET}/KushagraOS-44.iso-CHECKSUM" --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
