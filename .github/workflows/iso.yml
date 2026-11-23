@@ -59,15 +59,40 @@ jobs:
 
       - name: Ensure Titanoboa Contract Compliance
         run: |
+          set -euo pipefail
           IMAGE_TAG="${{ github.event.inputs.image_tag || '44' }}"
           IMAGE_REF="ghcr.io/${{ github.repository_owner }}/kushagra-os:${IMAGE_TAG}"
-          echo "Injecting verified Titanoboa iso.yaml into local container image..."
+          echo "Injecting verified Titanoboa contract files into ${IMAGE_REF}..."
+
+          # 1. Stage official Fedora signed UEFI binaries (shim + grub2-efi)
+          mkdir -p /tmp/efi-staging/EFI/fedora /tmp/efi-staging/EFI/BOOT
+          echo "Extracting signed UEFI bootloader binaries via Fedora container..."
+          sudo podman run --rm -v /tmp/efi-staging:/out quay.io/fedora/fedora:latest bash -c '
+            set -euo pipefail
+            dnf install -y --downloadonly --downloaddir=/tmp/rpms shim-x64 grub2-efi-x64
+            cd /tmp
+            for r in /tmp/rpms/*.rpm; do rpm2cpio "$r" | cpio -idmv; done
+            find /tmp -name "shimx64.efi" -exec cp -vf {} /out/EFI/fedora/shimx64.efi \;
+            find /tmp -name "grubx64.efi" -exec cp -vf {} /out/EFI/fedora/grubx64.efi \;
+            find /tmp -name "mmx64.efi" -exec cp -vf {} /out/EFI/fedora/mmx64.efi \;
+            find /tmp -name "BOOTX64.EFI" -exec cp -vf {} /out/EFI/BOOT/BOOTX64.EFI \;
+            if [ ! -f /out/EFI/BOOT/BOOTX64.EFI ] && [ -f /out/EFI/fedora/shimx64.efi ]; then
+              cp -vf /out/EFI/fedora/shimx64.efi /out/EFI/BOOT/BOOTX64.EFI
+            fi
+            echo "Staged EFI directory contents:"
+            ls -laR /out/EFI
+          '
+
+          # 2. Inject iso.yaml and staged EFI directory into the container image
           sudo podman create --name kushagra-iso-patch "${IMAGE_REF}"
           sudo podman cp files/system/usr/lib/bootc-image-builder/iso.yaml kushagra-iso-patch:/usr/lib/bootc-image-builder/iso.yaml
+          sudo podman cp /tmp/efi-staging/EFI kushagra-iso-patch:/boot/efi/EFI
           sudo podman commit kushagra-iso-patch "${IMAGE_REF}"
           sudo podman rm -f kushagra-iso-patch
-          echo "Image ${IMAGE_REF} successfully staged in local Podman storage:"
-          sudo podman images "${IMAGE_REF}"
+
+          # 3. Verify contract compliance inside committed image
+          echo "Verifying contract compliance inside ${IMAGE_REF}:"
+          sudo podman run --rm "${IMAGE_REF}" ls -la /usr/lib/bootc-image-builder/iso.yaml /boot/efi/EFI/fedora
 
       - name: Generate LiveCD ISO with Titanoboa
         # Uses Titanoboa composite action to build a bootc bootable LiveCD ISO
