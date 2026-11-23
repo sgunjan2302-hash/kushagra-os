@@ -69,13 +69,15 @@ jobs:
           echo "Extracting signed UEFI bootloader binaries via Fedora container..."
           sudo podman run --rm -v /tmp/efi-staging:/out quay.io/fedora/fedora:latest bash -c '
             set -euo pipefail
-            dnf install -y --downloadonly --downloaddir=/tmp/rpms shim-x64 grub2-efi-x64
-            cd /tmp
-            for r in /tmp/rpms/*.rpm; do rpm2cpio "$r" | cpio -idmv; done
-            find /tmp -name "shimx64.efi" -exec cp -vf {} /out/EFI/fedora/shimx64.efi \;
-            find /tmp -name "grubx64.efi" -exec cp -vf {} /out/EFI/fedora/grubx64.efi \;
-            find /tmp -name "mmx64.efi" -exec cp -vf {} /out/EFI/fedora/mmx64.efi \;
-            find /tmp -name "BOOTX64.EFI" -exec cp -vf {} /out/EFI/BOOT/BOOTX64.EFI \;
+            dnf install -y shim-x64 grub2-efi-x64
+            mkdir -p /out/EFI
+            if [ -d /boot/efi/EFI ]; then
+              cp -av /boot/efi/EFI/* /out/EFI/
+            fi
+            if [ -d /usr/lib/efi ]; then
+              find /usr/lib/efi -name "*.efi" -exec cp -vf {} /out/EFI/fedora/ \; 2>/dev/null || true
+            fi
+            mkdir -p /out/EFI/BOOT /out/EFI/fedora
             if [ ! -f /out/EFI/BOOT/BOOTX64.EFI ] && [ -f /out/EFI/fedora/shimx64.efi ]; then
               cp -vf /out/EFI/fedora/shimx64.efi /out/EFI/BOOT/BOOTX64.EFI
             fi
