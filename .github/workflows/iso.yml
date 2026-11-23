@@ -35,6 +35,40 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Free Runner Disk Space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          echo "=== Disk space after cleanup ==="
+          df -h /
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Pull Target Container Image into Podman Storage
+        run: |
+          IMAGE_TAG="${{ github.event.inputs.image_tag || '44' }}"
+          IMAGE_REF="ghcr.io/${{ github.repository_owner }}/kushagra-os:${IMAGE_TAG}"
+          echo "Pulling ${IMAGE_REF} into rootful Podman store..."
+          sudo podman pull "${IMAGE_REF}"
+
+      - name: Ensure Titanoboa Contract Compliance
+        run: |
+          IMAGE_TAG="${{ github.event.inputs.image_tag || '44' }}"
+          IMAGE_REF="ghcr.io/${{ github.repository_owner }}/kushagra-os:${IMAGE_TAG}"
+          echo "Injecting verified Titanoboa iso.yaml into local container image..."
+          sudo podman create --name kushagra-iso-patch "${IMAGE_REF}"
+          sudo podman cp files/system/usr/lib/bootc-image-builder/iso.yaml kushagra-iso-patch:/usr/lib/bootc-image-builder/iso.yaml
+          sudo podman commit kushagra-iso-patch "${IMAGE_REF}"
+          sudo podman rm -f kushagra-iso-patch
+          echo "Image ${IMAGE_REF} successfully staged in local Podman storage:"
+          sudo podman images "${IMAGE_REF}"
+
       - name: Generate LiveCD ISO with Titanoboa
         # Uses Titanoboa composite action to build a bootc bootable LiveCD ISO
         # Configuration contract is baked into the image at /usr/lib/bootc-image-builder/iso.yaml
@@ -44,17 +78,9 @@ jobs:
           image-ref: ghcr.io/${{ github.repository_owner }}/kushagra-os:${{ github.event.inputs.image_tag || '44' }}
           iso-dest: ${{ github.workspace }}/KushagraOS-44.iso
 
-      # Fallback Alternative Builder (Non-Live Container Installer):
-      # - name: Build Non-Live Installer Fallback
-      #   uses: JasonN3/build-container-installer@v1.5.0
-      #   with:
-      #     image_name: kushagra-os
-      #     image_repo: ghcr.io/${{ github.repository_owner }}
-      #     image_tag: ${{ github.event.inputs.image_tag || '44' }}
-      #     iso_name: KushagraOS-44-installer.iso
-
       - name: Generate SHA256 Checksum
         run: |
+          cd "${{ github.workspace }}"
           sha256sum KushagraOS-44.iso > KushagraOS-44.iso-CHECKSUM
           cat KushagraOS-44.iso-CHECKSUM
 

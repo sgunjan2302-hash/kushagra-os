@@ -13,5 +13,6 @@
 *.desktop text eol=lf
 *.plymouth text eol=lf
 *.net text eol=lf
+*.py text eol=lf
 environment text eol=lf
 kwinrc text eol=lf

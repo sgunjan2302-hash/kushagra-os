@@ -116,4 +116,18 @@ if os.path.exists(just_file):
 else:
     record('60-custom.just Location', 'FAIL', f'Missing {just_file}')
 
+# 8. Validate Titanoboa iso.yaml Contract
+try:
+    with open('files/system/usr/lib/bootc-image-builder/iso.yaml', 'r', encoding='utf-8') as fp:
+        iso_cfg = yaml.safe_load(fp)
+    entries = iso_cfg.get('grub2', {}).get('entries', [])
+    valid_entries = all('name' in e and 'linux' in e and 'initrd' in e for e in entries)
+    if iso_cfg.get('label') and entries and valid_entries:
+        record('Titanoboa iso.yaml Contract', 'PASS', f'Valid label "{iso_cfg.get("label")}" with {len(entries)} GRUB2 entries')
+    else:
+        record('Titanoboa iso.yaml Contract', 'FAIL', f'Invalid iso.yaml entries structure: {entries}')
+except Exception as e:
+    record('Titanoboa iso.yaml Contract', 'FAIL', str(e))
+
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)
+

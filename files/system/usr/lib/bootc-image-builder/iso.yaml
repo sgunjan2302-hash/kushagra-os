@@ -3,9 +3,9 @@ grub2:
   default: "0"
   timeout: 10
   entries:
-    - title: "Start Kushagra OS 44 (LiveCD Desktop)"
-      options: "quiet splash rd.live.image"
-    - title: "Install Kushagra OS 44 to Disk"
-      options: "quiet splash inst.stage2=hd:LABEL=KushagraOS-44"
-    - title: "Troubleshooting / Safe Graphics Mode"
-      options: "nomodeset"
+    - name: "Start Kushagra OS 44 (LiveCD Desktop)"
+      linux: "/images/pxeboot/vmlinuz quiet splash root=live:CDLABEL=KushagraOS-44 rd.live.image"
+      initrd: "/images/pxeboot/initrd.img"
+    - name: "Start Kushagra OS 44 (Safe Graphics / nomodeset)"
+      linux: "/images/pxeboot/vmlinuz nomodeset quiet splash root=live:CDLABEL=KushagraOS-44 rd.live.image"
+      initrd: "/images/pxeboot/initrd.img"
