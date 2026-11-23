@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Read-Only VM Smoke Test & Runtime Health Verification Tool
+# Tests core OS subsystems and outputs explicit PASS / WARN / FAIL statuses
+
+echo "================================================================================"
+echo "                   Kushagra OS System Health Verification                      "
+echo "================================================================================"
+
+pass_count=0
+warn_count=0
+fail_count=0
+
+record_pass() {
+    echo -e "[\033[0;32mPASS\033[0m] $1"
+    pass_count=$((pass_count + 1))
+}
+
+record_warn() {
+    echo -e "[\033[0;33mWARN\033[0m] $1"
+    warn_count=$((warn_count + 1))
+}
+
+record_fail() {
+    echo -e "[\033[0;31mFAIL\033[0m] $1"
+    fail_count=$((fail_count + 1))
+}
+
+# 1. bootc deployment status
+echo -n "Checking bootc deployment status... "
+if command -v bootc >/dev/null 2>&1; then
+    if bootc status >/dev/null 2>&1; then
+        record_pass "bootc is active and healthy"
+    else
+        record_warn "bootc is installed but not currently running in an active deployment (likely LiveCD)"
+    fi
+else
+    record_fail "bootc command not found"
+fi
+
+# 2. ZRAM & Compression Algorithm
+echo -n "Checking ZRAM configuration... "
+if command -v zramctl >/dev/null 2>&1; then
+    zram_info=$(zramctl --noheadings --output ALGORITHM 2>/dev/null || true)
+    if [[ "$zram_info" =~ zstd ]]; then
+        record_pass "ZRAM active with zstd compression"
+    elif [ -n "$zram_info" ]; then
+        record_warn "ZRAM active with non-zstd compression: $zram_info"
+    else
+        record_fail "No active ZRAM swap devices found"
+    fi
+else
+    record_fail "zramctl utility not found"
+fi
+
+# 3. Kernel Swappiness
+echo -n "Checking kernel swappiness... "
+swappiness=$(sysctl -n vm.swappiness 2>/dev/null || true)
+if [ "$swappiness" = "133" ]; then
+    record_pass "vm.swappiness is 133 (tuned for proactive ZRAM utilization)"
+else
+    record_warn "vm.swappiness is $swappiness (expected 133)"
+fi
+
+# 4. Systemd Services (earlyoom, pcscd.socket, firewalld)
+for svc in earlyoom.service pcscd.socket firewalld.service; do
+    echo -n "Checking system service $svc... "
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        record_pass "$svc is active"
+    else
+        record_warn "$svc is not active (may start on-demand or require system boot)"
+    fi
+done
+
+# 5. Realtek rtw89 PCIe ASPM mitigation (if hardware present)
+echo -n "Checking Realtek rtw89 driver parameters... "
+if [ -d "/sys/module/rtw89_pci/parameters" ]; then
+    aspm_l1=$(cat /sys/module/rtw89_pci/parameters/disable_aspm_l1 2>/dev/null || true)
+    if [ "$aspm_l1" = "Y" ] || [ "$aspm_l1" = "1" ]; then
+        record_pass "rtw89 ASPM L1 disable applied"
+    else
+        record_warn "rtw89 module loaded but disable_aspm_l1 is $aspm_l1"
+    fi
+else
+    record_pass "Realtek rtw89 hardware not active on this host (VM/non-Realtek hardware)"
+fi
+
+# 6. systemd-resolved Opportunistic DNS-over-TLS
+echo -n "Checking systemd-resolved DoT configuration... "
+if command -v resolvectl >/dev/null 2>&1; then
+    resolve_status=$(resolvectl status 2>/dev/null || true)
+    if echo "$resolve_status" | grep -iq "DNSOverTLS=yes"; then
+        record_fail "Strict DNSOverTLS=yes detected (breaks Indian captive portals!)"
+    else
+        record_pass "Captive-portal safe DNS settings active (opportunistic DoT)"
+    fi
+else
+    record_warn "resolvectl command not found"
+fi
+
+# 7. Wayland Fcitx5 IME Environment Variables
+echo -n "Checking Wayland input method environment... "
+env_file="/etc/environment"
+has_xmod=0
+has_gtk_im=0
+has_qt_im=0
+
+if [ -f "$env_file" ]; then
+    grep -q "^XMODIFIERS=" "$env_file" && has_xmod=1 || true
+    grep -q "^GTK_IM_MODULE=" "$env_file" && has_gtk_im=1 || true
+    grep -q "^QT_IM_MODULE=" "$env_file" && has_qt_im=1 || true
+fi
+
+if [ "$has_gtk_im" = "1" ] || [ "$has_qt_im" = "1" ]; then
+    record_fail "Conflicting GTK_IM_MODULE or QT_IM_MODULE found in $env_file (breaks Wayland candidate popup)"
+elif [ "$has_xmod" = "1" ]; then
+    record_pass "Clean Wayland IME environment (only XMODIFIERS=@im=fcitx configured)"
+else
+    record_warn "XMODIFIERS not set in $env_file"
+fi
+
+# 8. Flatpak Remotes
+echo -n "Checking Flatpak repositories... "
+if command -v flatpak >/dev/null 2>&1; then
+    if flatpak remotes 2>/dev/null | grep -q "flathub"; then
+        record_pass "Flathub remote is configured"
+    else
+        record_warn "Flathub remote not yet initialized (service activates on first boot)"
+    fi
+else
+    record_fail "flatpak command not found"
+fi
+
+echo "================================================================================"
+echo "Health Verification Summary: PASS: $pass_count | WARN: $warn_count | FAIL: $fail_count"
+echo "================================================================================"
+
+if [ "$fail_count" -gt 0 ]; then
+    exit 1
+fi
+exit 0

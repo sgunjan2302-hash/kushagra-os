@@ -1,0 +1,23 @@
+# Secrets & Private Signing Keys (NEVER commit private keys)
+*.key
+*.private
+*.secret
+cosign.key
+
+# Build Artifacts & ISOs
+*.iso
+*.iso-CHECKSUM
+*.tar.gz
+*.qcow2
+
+# Editor & System Files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Python Cache
+__pycache__/
+*.py[cod]

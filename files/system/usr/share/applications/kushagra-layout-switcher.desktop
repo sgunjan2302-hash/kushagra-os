@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Kushagra Layout Switcher
+GenericName=Desktop Layout Switcher
+Comment=Switch between Familiar (Windows) and Studio (macOS) desktop layouts
+Exec=kushagra-layout-switch
+Icon=preferences-desktop-theme
+Terminal=true
+Type=Application
+Categories=Settings;DesktopSettings;Qt;KDE;
+Keywords=layout;plasma;dock;taskbar;switcher;
+StartupNotify=false

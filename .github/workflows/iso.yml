@@ -1,0 +1,60 @@
+name: Build Bootable LiveCD ISO
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-iso:
+    name: Build LiveCD ISO (Titanoboa)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Generate LiveCD ISO with Titanoboa
+        # Uses Titanoboa which reads /usr/lib/bootc-image-builder/iso.yaml baked in image
+        uses: ublue-os/titanoboa@main
+        id: titanoboa
+        with:
+          image_name: kushagra-os
+          image_tag: 44
+          image_repo: ghcr.io/${{ github.repository_owner }}
+          iso_name: KushagraOS-44.iso
+
+      # Fallback Alternative Builder (Non-Live Container Installer):
+      # - name: Build Non-Live Installer Fallback
+      #   uses: JasonN3/build-container-installer@v1.5.0
+      #   with:
+      #     image_name: kushagra-os
+      #     image_repo: ghcr.io/${{ github.repository_owner }}
+      #     image_tag: 44
+      #     iso_name: KushagraOS-44-installer.iso
+
+      - name: Generate SHA256 Checksum
+        run: |
+          sha256sum KushagraOS-44.iso > KushagraOS-44.iso-CHECKSUM
+          cat KushagraOS-44.iso-CHECKSUM
+
+      - name: Upload ISO to Cloudflare R2 ($0 Egress Storage)
+        # Note: GitHub Releases has a 2 GiB per-file hard limit. Full ISOs are uploaded to Cloudflare R2.
+        if: env.R2_ACCOUNT_ID != ''
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp KushagraOS-44.iso "s3://${{ secrets.R2_BUCKET }}/KushagraOS-44.iso" --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp KushagraOS-44.iso-CHECKSUM "s3://${{ secrets.R2_BUCKET }}/KushagraOS-44.iso-CHECKSUM" --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"

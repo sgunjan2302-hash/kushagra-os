@@ -1,0 +1,17 @@
+# Set default behavior to automatically normalize line endings
+* text=auto
+
+# Enforce LF line endings on all Linux configuration, shell, and BlueBuild files
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.conf text eol=lf
+*.xml text eol=lf
+*.js text eol=lf
+*.just text eol=lf
+*.mim text eol=lf
+*.desktop text eol=lf
+*.plymouth text eol=lf
+*.net text eol=lf
+environment text eol=lf
+kwinrc text eol=lf

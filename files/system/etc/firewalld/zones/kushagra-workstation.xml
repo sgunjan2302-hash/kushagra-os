@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<zone>
+  <short>Kushagra Workstation</short>
+  <description>Hardened default workstation zone for Kushagra OS. Permits local network discovery, printing, and KDE Connect phone pairing without exposing SSH (port 22) or unprivileged high ports (1025-65535).</description>
+  <service name="dhcpv6-client"/>
+  <service name="mdns"/>
+  <service name="ipp-client"/>
+  <service name="kdeconnect"/>
+</zone>

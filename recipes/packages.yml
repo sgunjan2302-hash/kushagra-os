@@ -1,0 +1,39 @@
+type: dnf
+install:
+  skip-unavailable: true
+  packages:
+    # --- Low-RAM System Survival ---
+    - earlyoom
+
+    # --- Indic Typography & Input Method Engine (Fcitx5 + m17n) ---
+    # Note: Additional Noto Indic font packages should be verified on Fedora 44 before adding
+    - lohit-devanagari-fonts
+    - fcitx5
+    - fcitx5-m17n
+    - m17n-db
+    - kcm-fcitx5
+    - fcitx5-configtool
+
+    # --- Indian DSC Token & Smart Card Subsystem (Feitian ePass2003) ---
+    - opensc
+    - pcsc-lite-ccid
+
+    # --- Android Subsystem (Waydroid) ---
+    - waydroid
+    - waydroid-selinux
+
+    # --- Hardware Firmware (Realtek Wi-Fi / Bluetooth) ---
+    - realtek-firmware
+
+    # --- Driverless Printing & Scanning (IPP Everywhere / eSCL) ---
+    - ipp-usb
+
+    # --- Desktop Utilities & Phone Connectivity ---
+    - plasma-firewall
+    - kde-connect
+
+remove:
+  packages:
+    # Remove RPM Firefox in favor of sandboxed Flatpak
+    - firefox
+    - firefox-langpacks

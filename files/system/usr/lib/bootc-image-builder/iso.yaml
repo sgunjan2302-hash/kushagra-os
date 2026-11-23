@@ -1,0 +1,11 @@
+label: "KushagraOS-44"
+grub2:
+  default: "0"
+  timeout: 10
+  entries:
+    - title: "Start Kushagra OS 44 (LiveCD Desktop)"
+      options: "quiet splash rd.live.image"
+    - title: "Install Kushagra OS 44 to Disk"
+      options: "quiet splash inst.stage2=hd:LABEL=KushagraOS-44"
+    - title: "Troubleshooting / Safe Graphics Mode"
+      options: "nomodeset"

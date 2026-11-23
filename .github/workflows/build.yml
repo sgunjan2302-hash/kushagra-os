@@ -1,0 +1,45 @@
+name: Build Kushagra OS
+
+on:
+  schedule:
+    - cron: '00 06 * * *' # Daily build at 06:00 UTC
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  bluebuild:
+    name: Build and Push OCI Image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Build Kushagra OS Image
+        uses: blue-build/github-action@v1.14.0
+        with:
+          recipe: recipes/recipe.yml
+          cosign_private_key: ${{ secrets.SIGNING_SECRET }}
+          pr_event_number: ${{ github.event.number }}
+          maximize_build_space: 'true'
+          # Set chunkah: 'false' for fast iteration during testing.
+          # For production releases, toggle chunkah: 'true' to reduce pull bandwidth.
+          # NEVER use deprecated rechunk: 'true'.
+          chunkah: 'false'

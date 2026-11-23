@@ -1,0 +1,5 @@
+# Kushagra OS - System Environment
+# Under KDE Plasma 6 Wayland, Fcitx5 is managed by KWin Virtual Keyboard protocol.
+# ONLY XMODIFIERS is exported here to support legacy XWayland applications.
+# NEVER set global GTK_IM_MODULE or QT_IM_MODULE here as it causes input popups to freeze/blink.
+XMODIFIERS=@im=fcitx

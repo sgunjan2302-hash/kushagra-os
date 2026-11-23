@@ -1,0 +1,47 @@
+# yaml-language-server: $schema=https://schema.blue-build.org/recipe-v1.json
+---
+name: kushagra-os
+description: Kushagra OS - An unbreakable, India-first universal desktop operating system combining familiar desktop UX, low-RAM resilience, and immutable reliability.
+base-image: ghcr.io/ublue-os/kinoite-main
+image-version: 44
+
+modules:
+  - type: files
+    files:
+      - source: system
+        destination: /
+
+  - from-file: packages.yml
+
+  - type: script
+    scripts:
+      - 01-configure-fcitx5-wayland.sh
+      - 02-system-tuning.sh
+
+  - type: systemd
+    system:
+      enabled:
+        - earlyoom.service
+        - pcscd.socket
+        - avahi-daemon.socket
+        - cups.socket
+
+  - from-file: flatpaks.yml
+
+  - type: os-release
+    properties:
+      NAME: "Kushagra OS"
+      ID: "kushagra-os"
+      ID_LIKE: "fedora"
+      PRETTY_NAME: "Kushagra OS (v0.1 Prototype)"
+      DEFAULT_HOSTNAME: "kushagra-pc"
+      HOME_URL: "https://github.com/kushagra-os"
+      SUPPORT_URL: "https://github.com/kushagra-os/kushagra-os/issues"
+      BUG_REPORT_URL: "https://github.com/kushagra-os/kushagra-os/issues"
+      DOCUMENTATION_URL: "https://github.com/kushagra-os/kushagra-os"
+      LOGO: "kushagra-logo"
+      ANSI_COLOR: "0;38;2;255;153;51"
+
+  - type: signing
+
+  - type: initramfs

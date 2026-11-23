@@ -1,0 +1,25 @@
+type: default-flatpaks
+configurations:
+  - scope: system
+    notify: true
+    repo-url: https://dl.flathub.org/repo/flathub.flatpakrepo
+    repo-name: flathub
+    install:
+      # --- Primary Web Browser ---
+      - org.mozilla.firefox
+
+      # --- Office Productivity (Clean Wayland + Indic IME compatibility) ---
+      - org.onlyoffice.desktopeditors
+
+      # --- Video Editing & Media Creation ---
+      - org.kde.kdenlive
+
+      # --- Windows Application Compatibility Environment ---
+      - com.usebottles.bottles
+
+      # --- Flatpak Permissions & Ecosystem Management ---
+      - com.github.tchx84.Flatseal
+      - io.github.flattool.Warehouse
+
+      # --- System Performance & Process Monitor ---
+      - io.missioncenter.MissionCenter

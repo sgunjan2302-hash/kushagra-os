@@ -1,0 +1,16 @@
+[Plymouth Theme]
+Name=Kushagra OS BGRT Spinner
+Description=A modern BGRT and centered logo boot splash for Kushagra OS
+ModuleName=two-step
+
+[two-step]
+Font=Sans 12
+Title=Kushagra OS
+ImageDir=/usr/share/plymouth/themes/kushagra
+HorizontalAlignment=0.5
+VerticalAlignment=0.5
+Transition=fade
+TransitionDuration=0.3
+BackgroundStartColor=0x002244
+BackgroundEndColor=0x001122
+ProgressBarShowAnimation=true

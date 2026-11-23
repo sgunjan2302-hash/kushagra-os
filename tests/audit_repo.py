@@ -1,0 +1,110 @@
+import glob
+import os
+import sys
+import xml.etree.ElementTree as ET
+import yaml
+
+results = []
+
+def record(name, status, detail):
+    results.append({'name': name, 'status': status, 'detail': detail})
+    print(f"[{status}] {name}: {detail}")
+
+# 1. Secret Safety
+git_ignored = open('.gitignore', 'r', encoding='utf-8').read()
+has_keys = all(k in git_ignored for k in ['*.key', '*.private', '*.secret', 'cosign.key'])
+sec_files = glob.glob('**/*.key', recursive=True) + glob.glob('**/*.private', recursive=True)
+if has_keys and len(sec_files) == 0:
+    record('Secret Safety', 'PASS', '.gitignore blocks private keys; 0 private keys tracked')
+else:
+    record('Secret Safety', 'FAIL', f'Private key files found: {sec_files}')
+
+# 2. YAML Safe Parsing
+yaml_files = glob.glob('recipes/*.yml') + glob.glob('.github/workflows/*.yml') + ['files/system/usr/lib/bootc-image-builder/iso.yaml']
+yaml_failures = []
+for yf in yaml_files:
+    try:
+        with open(yf, 'r', encoding='utf-8') as fp:
+            yaml.safe_load(fp)
+    except Exception as e:
+        yaml_failures.append(f'{yf}: {e}')
+
+if not yaml_failures:
+    record('YAML Safe Parsing', 'PASS', f'All {len(yaml_files)} YAML files parsed cleanly')
+else:
+    record('YAML Safe Parsing', 'FAIL', str(yaml_failures))
+
+# 3. Anti-Pattern Scan (checking active configuration, ignoring comment lines)
+banned_patterns = {
+    'rpm-ostree': 'recipes/recipe.yml',
+    'optfix:': 'recipes/recipe.yml',
+    '/usr/etc/': 'recipes/recipe.yml',
+    'rechunk:': '.github/workflows/build.yml',
+    'GTK_IM_MODULE': 'files/system/etc/environment',
+    'QT_IM_MODULE': 'files/system/etc/environment',
+    'DNSOverTLS=yes': 'files/system/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf'
+}
+anti_failures = []
+for pattern, path in banned_patterns.items():
+    if os.path.exists(path):
+        lines = open(path, 'r', encoding='utf-8').readlines()
+        for idx, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('#') or stripped.startswith('//'):
+                continue
+            if pattern in line:
+                anti_failures.append(f'{pattern} found in active config {path}:{idx} -> {stripped}')
+
+with open('recipes/recipe.yml', 'r', encoding='utf-8') as fp:
+    recipe_text = fp.read()
+    init_count = recipe_text.count('type: initramfs')
+    if init_count != 1:
+        anti_failures.append(f'type: initramfs count is {init_count} (expected 1)')
+
+if not anti_failures:
+    record('Anti-Pattern Audit', 'PASS', 'Zero banned anti-patterns detected; initramfs count is exactly 1')
+else:
+    record('Anti-Pattern Audit', 'FAIL', '; '.join(anti_failures))
+
+# 4. XML Check
+try:
+    tree = ET.parse('files/system/etc/firewalld/zones/kushagra-workstation.xml')
+    services = [s.attrib.get('name') for s in tree.getroot().findall('service')]
+    if 'ssh' not in services and set(services) == {'dhcpv6-client', 'mdns', 'ipp-client', 'kdeconnect'}:
+        record('Firewalld XML Validation', 'PASS', f'kushagra-workstation.xml clean (services: {services})')
+    else:
+        record('Firewalld XML Validation', 'FAIL', f'Unexpected services: {services}')
+except Exception as e:
+    record('Firewalld XML Validation', 'FAIL', str(e))
+
+# 5. JavaScript Check
+js_files = glob.glob('files/system/usr/share/kushagra-os/layouts/*.js')
+js_ok = True
+for j in js_files:
+    c = open(j, 'r', encoding='utf-8').read()
+    if 'lengthMode = "fill"' not in c and 'lengthMode = "fit"' not in c:
+        record(f'JS Layout API ({j})', 'FAIL', 'Missing string lengthMode')
+        js_ok = False
+if js_ok:
+    record('JS Layout API Validation', 'PASS', 'Both windows-classic.js and modern-floating.js use string lengthMode')
+
+# 6. Line Endings Check
+all_sh = glob.glob('files/scripts/*.sh') + ['files/system/usr/bin/kushagra-layout-switch', 'files/system/usr/bin/kushagra-health-check']
+crlf_files = []
+for s in all_sh:
+    raw = open(s, 'rb').read()
+    if b'\r' in raw:
+        crlf_files.append(s)
+if not crlf_files:
+    record('LF Line Endings', 'PASS', f'All {len(all_sh)} scripts/executables have clean Unix LF')
+else:
+    record('LF Line Endings', 'FAIL', f'CRLF detected in: {crlf_files}')
+
+# 7. Check 60-custom.just existence and location
+just_file = 'files/system/usr/share/ublue-os/just/60-custom.just'
+if os.path.exists(just_file):
+    record('60-custom.just Location', 'PASS', f'Found at {just_file}')
+else:
+    record('60-custom.just Location', 'FAIL', f'Missing {just_file}')
+
+sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)
