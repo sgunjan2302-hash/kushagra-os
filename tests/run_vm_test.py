@@ -4,8 +4,14 @@ import os
 import sys
 
 def main():
-    print("[1/5] Setting up VM environment in WSL2...")
-    setup_cmd = """
+    target_iso = sys.argv[1] if len(sys.argv) > 1 else '/mnt/f/KUSHAGRA OS/build/v0.1.5/KushagraOS-44.iso'
+    if not os.path.exists(target_iso.replace('/mnt/f/', 'f:/')):
+        # Fallback to legacy path if v0.1.5 not yet extracted
+        if os.path.exists('f:/KUSHAGRA OS/build/KushagraOS-44.iso'):
+            target_iso = '/mnt/f/KUSHAGRA OS/build/KushagraOS-44.iso'
+
+    print(f"[1/5] Setting up VM environment in WSL2 for {target_iso}...")
+    setup_cmd = f"""
 mkdir -p /tmp/kushagra_test
 mkdir -p "/mnt/f/KUSHAGRA OS/build/screenshots"
 rm -f /tmp/kushagra_test/monitor.sock /tmp/kushagra_test/serial.log /tmp/kushagra_test/screen.ppm
@@ -14,7 +20,7 @@ cp -f /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/kushagra_test/ovmf_vars.fd
     subprocess.run(["wsl", "-d", "Ubuntu-24.04", "-u", "root", "--", "bash", "-c", setup_cmd], check=True)
 
     print("[2/5] Creating runner script in WSL2...")
-    wsl_script = """#!/usr/bin/env python3
+    wsl_script = f"""#!/usr/bin/env python3
 import subprocess
 import socket
 import time
@@ -22,7 +28,7 @@ import os
 import sys
 from PIL import Image
 
-iso_path = '/mnt/f/KUSHAGRA OS/build/KushagraOS-44.iso'
+iso_path = '{target_iso}'
 artifact_dir = '/mnt/c/Users/sgunj/.gemini/antigravity/brain/282037fa-b7e1-44d0-be26-2adfcb5e1f34'
 screenshots_dir = '/mnt/f/KUSHAGRA OS/build/screenshots'
 sock_path = '/tmp/kushagra_test/monitor.sock'

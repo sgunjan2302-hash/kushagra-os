@@ -122,10 +122,11 @@ try:
         iso_cfg = yaml.safe_load(fp)
     entries = iso_cfg.get('grub2', {}).get('entries', [])
     valid_entries = all('name' in e and 'linux' in e and 'initrd' in e for e in entries)
-    if iso_cfg.get('label') and entries and valid_entries:
-        record('Titanoboa iso.yaml Contract', 'PASS', f'Valid label "{iso_cfg.get("label")}" with {len(entries)} GRUB2 entries')
+    has_enforcing = all('enforcing=0' in e.get('linux', '') for e in entries)
+    if iso_cfg.get('label') and entries and valid_entries and has_enforcing:
+        record('Titanoboa iso.yaml Contract', 'PASS', f'Valid label "{iso_cfg.get("label")}" with {len(entries)} GRUB2 entries (enforcing=0 verified)')
     else:
-        record('Titanoboa iso.yaml Contract', 'FAIL', f'Invalid iso.yaml entries structure: {entries}')
+        record('Titanoboa iso.yaml Contract', 'FAIL', f'Invalid iso.yaml entries structure or missing enforcing=0: {entries}')
 except Exception as e:
     record('Titanoboa iso.yaml Contract', 'FAIL', str(e))
 

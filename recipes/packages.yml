@@ -30,6 +30,7 @@ install:
 
     # --- LiveCD Initramfs & ISO Boot Support ---
     - dracut-live
+    - livesys-scripts
 
     # --- Desktop Utilities & Phone Connectivity ---
     - plasma-firewall
