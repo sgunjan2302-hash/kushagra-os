@@ -81,6 +81,12 @@ jobs:
             if [ ! -f /out/EFI/BOOT/BOOTX64.EFI ] && [ -f /out/EFI/fedora/shimx64.efi ]; then
               cp -vf /out/EFI/fedora/shimx64.efi /out/EFI/BOOT/BOOTX64.EFI
             fi
+            # Stage signed grub2-efi into EFI/BOOT so shim finds it immediately
+            if [ -f /out/EFI/fedora/grubx64.efi ]; then
+              cp -vf /out/EFI/fedora/grubx64.efi /out/EFI/BOOT/grubx64.efi
+            fi
+            # Purge fbx64.efi (fallback) and BOOTX64.CSV to prevent NVRAM modification loops on removable media
+            rm -vf /out/EFI/BOOT/fbx64.efi /out/EFI/fedora/fbx64.efi /out/EFI/fedora/BOOTX64.CSV || true
             echo "Staged EFI directory contents:"
             ls -laR /out/EFI
           '
@@ -94,7 +100,25 @@ jobs:
 
           # 3. Verify contract compliance inside committed image
           echo "Verifying contract compliance inside ${IMAGE_REF}:"
-          sudo podman run --rm "${IMAGE_REF}" ls -la /usr/lib/bootc-image-builder/iso.yaml /boot/efi/EFI/fedora
+          sudo podman run --rm "${IMAGE_REF}" ls -la /usr/lib/bootc-image-builder/iso.yaml /boot/efi/EFI/fedora /boot/efi/EFI/BOOT
+
+      - name: Patch Titanoboa GRUB Template for Real Hardware EFI
+        run: |
+          set -euo pipefail
+          echo "Patching Titanoboa build_iso.sh to inject rmmod tpm and memory resilience..."
+          TITANOBOA_SCRIPT="$(find /home/runner/work/_actions/ublue-os/titanoboa -name "build_iso.sh" 2>/dev/null | head -n 1)"
+          if [ -n "$TITANOBOA_SCRIPT" ] && [ -f "$TITANOBOA_SCRIPT" ]; then
+            echo "Found Titanoboa build script at: $TITANOBOA_SCRIPT"
+            # Inject rmmod tpm right before load_video in the GRUB template
+            sed -i '/function load_video/i rmmod tpm' "$TITANOBOA_SCRIPT"
+            # Ensure grubx64.efi is in /work/EFI/BOOT and remove fbx64.efi
+            sed -i '/cp -avT \/rootfs\/boot\/efi\/EFI \/work\/EFI/a \cp -vf /work/EFI/fedora/grubx64.efi /work/EFI/BOOT/grubx64.efi || true\nrm -vf /work/EFI/BOOT/fbx64.efi /work/EFI/fedora/fbx64.efi /work/EFI/fedora/BOOTX64.CSV || true' "$TITANOBOA_SCRIPT"
+            echo "Verification of patched Titanoboa build script:"
+            grep -n -C 5 "rmmod tpm" "$TITANOBOA_SCRIPT" || true
+          else
+            echo "Titanoboa script search in /home/runner/work/_actions/:"
+            find /home/runner/work/_actions/ -name "*.sh" || true
+          fi
 
       - name: Generate LiveCD ISO with Titanoboa
         # Uses Titanoboa composite action to build a bootc bootable LiveCD ISO

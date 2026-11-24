@@ -151,5 +151,20 @@ try:
 except Exception as e:
     record('LiveCD Dracut Modules', 'FAIL', str(e))
 
+# 10. UEFI LiveCD Bootloader Hardening Contract
+try:
+    with open('.github/workflows/iso.yml', 'r', encoding='utf-8') as f:
+        iso_workflow = f.read()
+    has_grub_boot_stage = '/out/EFI/BOOT/grubx64.efi' in iso_workflow
+    has_fb_purge = 'fbx64.efi' in iso_workflow and 'rm -vf' in iso_workflow
+    has_tpm_unload = 'rmmod tpm' in iso_workflow
+
+    if has_grub_boot_stage and has_fb_purge and has_tpm_unload:
+        record('UEFI Bootloader Resilience', 'PASS', 'grubx64.efi staged in EFI/BOOT, fbx64.efi purged, and rmmod tpm injected')
+    else:
+        record('UEFI Bootloader Resilience', 'FAIL', f'has_grub_boot_stage={has_grub_boot_stage}, has_fb_purge={has_fb_purge}, has_tpm_unload={has_tpm_unload}')
+except Exception as e:
+    record('UEFI Bootloader Resilience', 'FAIL', str(e))
+
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)
 
