@@ -115,3 +115,20 @@ check-dsc-token:
 # Run Kushagra OS system health verification suite
 health-check:
     @/usr/bin/kushagra-health-check
+
+# Launch Graphical Installer for Kushagra OS
+install-to-disk:
+    #!/usr/bin/env bash
+    if command -v liveinst >/dev/null 2>&1; then
+        echo "Launching Anaconda Live graphical installer..."
+        sudo liveinst
+    elif command -v calamares >/dev/null 2>&1; then
+        echo "Launching Calamares graphical installer..."
+        sudo calamares
+    elif command -v partitionmanager >/dev/null 2>&1; then
+        echo "Launching KDE Partition Manager..."
+        partitionmanager &
+    else
+        echo "Error: No graphical installer binary found in PATH."
+        exit 1
+    fi

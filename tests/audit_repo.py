@@ -166,5 +166,40 @@ try:
 except Exception as e:
     record('UEFI Bootloader Resilience', 'FAIL', str(e))
 
+# 11. LiveCD Auto-Login Contract
+try:
+    sddm_autologin = 'files/system/etc/sddm.conf.d/autologin.conf'
+    getty_autologin = 'files/system/etc/systemd/system/getty@tty1.service.d/autologin.conf'
+    tuning_sh = 'files/scripts/02-system-tuning.sh'
+
+    has_sddm = os.path.exists(sddm_autologin) and 'User=liveuser' in open(sddm_autologin).read()
+    has_getty = os.path.exists(getty_autologin) and '--autologin liveuser' in open(getty_autologin).read()
+    has_user_prov = 'useradd' in open(tuning_sh).read() and 'liveuser' in open(tuning_sh).read() and 'livesys_session="kde"' in open(tuning_sh).read()
+
+    if has_sddm and has_getty and has_user_prov:
+        record('LiveCD Auto-Login Contract', 'PASS', 'SDDM & agetty autologin configured; liveuser provisioned for KDE Plasma')
+    else:
+        record('LiveCD Auto-Login Contract', 'FAIL', f'has_sddm={has_sddm}, has_getty={has_getty}, has_user_prov={has_user_prov}')
+except Exception as e:
+    record('LiveCD Auto-Login Contract', 'FAIL', str(e))
+
+# 12. Graphical Dual-Boot Installer Contract
+try:
+    pkgs_file = 'recipes/packages.yml'
+    desktop_launcher = 'files/system/etc/skel/Desktop/liveinst.desktop'
+    just_file = 'files/system/usr/share/ublue-os/just/60-custom.just'
+
+    pkgs_text = open(pkgs_file).read()
+    has_anaconda = 'anaconda-live' in pkgs_text and 'partitionmanager' in pkgs_text
+    has_launcher = os.path.exists(desktop_launcher) and 'Exec=liveinst' in open(desktop_launcher).read()
+    has_just_recipe = 'install-to-disk' in open(just_file).read()
+
+    if has_anaconda and has_launcher and has_just_recipe:
+        record('Graphical Installer Contract', 'PASS', 'anaconda-live & partitionmanager in packages.yml; liveinst.desktop & ujust install-to-disk verified')
+    else:
+        record('Graphical Installer Contract', 'FAIL', f'has_anaconda={has_anaconda}, has_launcher={has_launcher}, has_just_recipe={has_just_recipe}')
+except Exception as e:
+    record('Graphical Installer Contract', 'FAIL', str(e))
+
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)
 

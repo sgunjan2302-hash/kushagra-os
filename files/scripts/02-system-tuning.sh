@@ -47,4 +47,32 @@ for bin in /usr/bin/kushagra-layout-switch /usr/bin/kushagra-health-check; do
     fi
 done
 
+# 4. Configure LiveCD autologin environment & livesys
+echo "Configuring LiveCD autologin environment and livesys..."
+mkdir -p /etc/sysconfig
+echo 'livesys_session="kde"' > /etc/sysconfig/livesys
+chmod 0644 /etc/sysconfig/livesys
+
+# Provision default liveuser at build-time (ensures account exists prior to first boot)
+if ! id "liveuser" >/dev/null 2>&1; then
+    echo "Provisioning default liveuser account for LiveCD autologin..."
+    useradd -m -u 1000 -G wheel -c "Kushagra OS Live User" -s /bin/bash liveuser
+    passwd -d liveuser || true
+    mkdir -p /etc/sudoers.d
+    echo "liveuser ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/90-liveuser
+    chmod 0440 /etc/sudoers.d/90-liveuser
+fi
+
+# Unlock root account with blank password for emergency maintenance
+passwd -d root || true
+
+# Enable livesys systemd services
+systemctl enable livesys.service livesys-late.service || true
+
+# Ensure Desktop shortcut is present for liveuser
+mkdir -p /etc/skel/Desktop
+if [ -f "/etc/skel/Desktop/liveinst.desktop" ]; then
+    chmod 0755 /etc/skel/Desktop/liveinst.desktop
+fi
+
 echo "==> [Hook 02] System tuning and firewall configuration complete."

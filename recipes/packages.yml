@@ -32,6 +32,14 @@ install:
     - dracut-live
     - livesys-scripts
 
+    # --- LiveCD Graphical Installer & Partition Management ---
+    - anaconda-live
+    - anaconda-gui
+    - libblockdev-btrfs
+    - libblockdev-lvm
+    - libblockdev-dm
+    - partitionmanager
+
     # --- Desktop Utilities & Phone Connectivity ---
     - plasma-firewall
     - kde-connect
