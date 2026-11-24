@@ -8,6 +8,11 @@ on:
         required: true
         default: '44'
         type: string
+      image_digest:
+        description: 'Exact cryptographic container digest (e.g. sha256:...)'
+        required: false
+        default: ''
+        type: string
   push:
     tags:
       - 'v*'
@@ -53,9 +58,17 @@ jobs:
       - name: Pull Target Container Image into Podman Storage
         run: |
           IMAGE_TAG="${{ github.event.inputs.image_tag || '44' }}"
-          IMAGE_REF="ghcr.io/${{ github.repository_owner }}/kushagra-os:${IMAGE_TAG}"
-          echo "Pulling ${IMAGE_REF} into rootful Podman store..."
-          sudo podman pull "${IMAGE_REF}"
+          IMAGE_DIGEST="${{ github.event.inputs.image_digest || '' }}"
+          if [ -n "$IMAGE_DIGEST" ]; then
+            IMAGE_PULL_REF="ghcr.io/${{ github.repository_owner }}/kushagra-os@${IMAGE_DIGEST}"
+            echo "Pulling verified content-addressed image: ${IMAGE_PULL_REF}"
+            sudo podman pull "${IMAGE_PULL_REF}"
+            sudo podman tag "${IMAGE_PULL_REF}" "ghcr.io/${{ github.repository_owner }}/kushagra-os:${IMAGE_TAG}"
+          else
+            IMAGE_PULL_REF="ghcr.io/${{ github.repository_owner }}/kushagra-os:${IMAGE_TAG}"
+            echo "Pulling latest tag reference: ${IMAGE_PULL_REF}"
+            sudo podman pull "${IMAGE_PULL_REF}"
+          fi
 
       - name: Ensure Titanoboa Contract Compliance
         run: |

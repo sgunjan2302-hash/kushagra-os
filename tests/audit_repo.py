@@ -201,5 +201,20 @@ try:
 except Exception as e:
     record('Graphical Installer Contract', 'FAIL', str(e))
 
+# 13. Phase 2 Windows Compatibility & Storage Hygiene Contract
+try:
+    just_content = open('files/system/usr/share/ublue-os/just/60-custom.just').read()
+    has_gaming = 'install-gaming:' in just_content
+    has_ubuntu_box = 'box-ubuntu:' in just_content
+    has_clean_disk = 'clean-disk:' in just_content
+    has_anti_cheat = 'check-anti-cheat:' in just_content
+
+    if has_gaming and has_ubuntu_box and has_clean_disk and has_anti_cheat:
+        record('Phase 2 Windows Compatibility Contract', 'PASS', 'install-gaming, box-ubuntu, clean-disk, and check-anti-cheat verified in 60-custom.just')
+    else:
+        record('Phase 2 Windows Compatibility Contract', 'FAIL', f'has_gaming={has_gaming}, has_ubuntu_box={has_ubuntu_box}, has_clean_disk={has_clean_disk}, has_anti_cheat={has_anti_cheat}')
+except Exception as e:
+    record('Phase 2 Windows Compatibility Contract', 'FAIL', str(e))
+
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)
 

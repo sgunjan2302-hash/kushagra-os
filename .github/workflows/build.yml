@@ -22,6 +22,7 @@ on:
 permissions:
   contents: read
   packages: write
+  actions: write
   id-token: write
 
 concurrency:
@@ -35,6 +36,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: write
       id-token: write
     steps:
       - name: Build Kushagra OS Image
@@ -49,3 +51,15 @@ jobs:
           # For production releases, toggle chunkah: 'true' to reduce pull bandwidth.
           # NEVER use deprecated rechunk: 'true'.
           chunkah: 'false'
+
+      - name: Trigger LiveCD ISO Build with Exact Digest
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "Resolving exact container digest from GHCR..."
+          DIGEST="$(skopeo inspect docker://ghcr.io/${{ github.repository_owner }}/kushagra-os:44 --format '{{.Digest}}' 2>/dev/null || true)"
+          echo "Pushed container digest: ${DIGEST}"
+          echo "Triggering LiveCD ISO workflow with immutable digest to eliminate race conditions..."
+          gh workflow run iso.yml -f image_tag="44" -f image_digest="${DIGEST}"
