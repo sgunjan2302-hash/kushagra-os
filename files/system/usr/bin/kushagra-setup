@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Custom Qt6/QML First-Boot Setup Wizard Launcher
+exec /usr/bin/python3 /usr/share/kushagra-os/oobe/main.py "$@"

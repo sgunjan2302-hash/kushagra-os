@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# One-shot first-login hook executed inside the new user's Plasma 6 Wayland session
+STYLE="${1:-classic}"
+AUTOSTART_HOOK="${HOME}/.config/autostart/kushagra-firstboot-layout.desktop"
+
+# Wait up to 25 seconds for PlasmaShell DBus interface to become ready
+for _ in $(seq 1 25); do
+    if qdbus6 org.kde.plasmashell /PlasmaShell >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+if [ -x /usr/bin/kushagra-layout-switch ]; then
+    /usr/bin/kushagra-layout-switch "${STYLE}" || true
+fi
+
+# Clean up one-shot autostart entry and any inherited LiveCD desktop icon
+rm -f "${AUTOSTART_HOOK}" "${HOME}/Desktop/liveinst.desktop" 2>/dev/null || true

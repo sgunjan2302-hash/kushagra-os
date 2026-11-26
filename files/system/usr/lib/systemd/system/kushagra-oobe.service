@@ -1,0 +1,14 @@
+[Unit]
+Description=Kushagra OS First-Boot Out-of-Box Setup Wizard (OOBE)
+After=systemd-user-sessions.service plymouth-quit.service systemd-logind.service dbus.service livesys.service
+Before=display-manager.service
+ConditionPathExists=/var/lib/kushagra-oobe-pending
+ConditionPathExists=!/etc/kushagra-oobe-done
+ConditionKernelCommandLine=!rd.live.image
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/kushagra-setup-bootutil
+
+[Install]
+WantedBy=multi-user.target

@@ -14,5 +14,11 @@
 *.plymouth text eol=lf
 *.net text eol=lf
 *.py text eol=lf
+*.qml text eol=lf
+*.service text eol=lf
+*.policy text eol=lf
+*.rules text eol=lf
+files/system/usr/bin/* text eol=lf
+files/system/usr/libexec/* text eol=lf
 environment text eol=lf
 kwinrc text eol=lf

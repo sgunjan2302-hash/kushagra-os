@@ -1,0 +1,17 @@
+#!/usr/bin/sh
+# Runs exclusively during LiveCD boot (rd.live.image) inside livesys-main
+mkdir -p /etc/sudoers.d
+echo "liveuser ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/90-liveuser
+chmod 0440 /etc/sudoers.d/90-liveuser
+
+# Ensure Fcitx5 Wayland config is preserved alongside Anaconda locale tracking on liveuser
+mkdir -p /home/liveuser/.config
+cat << 'KWIN_EOF' > /home/liveuser/.config/kwinrc
+[Wayland]
+FollowLocale1=true
+InputMethod[$e]=/usr/share/applications/fcitx5-wayland-launcher.desktop
+VirtualKeyboardEnabled=true
+KWIN_EOF
+
+# Suppress Kushagra OOBE wizard during LiveCD sessions
+rm -f /var/lib/kushagra-oobe-pending

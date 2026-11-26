@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kushagra OS Setup Wizard
+Comment=First-boot configuration wizard for Kushagra OS
+Exec=/usr/bin/kushagra-setup
+Icon=/usr/share/kushagra-os/branding/logo-symbol.svg
+NoDisplay=true
+X-KDE-autostart-phase=1
+StartupNotify=false

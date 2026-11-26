@@ -35,17 +35,15 @@ install:
     # --- LiveCD Graphical Installer & Partition Management ---
     - anaconda-live
     - anaconda-gui
+    - firefox
     - libblockdev-btrfs
     - libblockdev-lvm
     - libblockdev-dm
     - partitionmanager
 
+    # --- Custom First-Boot OOBE Setup Wizard (Qt6/QML) ---
+    - python3-pyqt6
+
     # --- Desktop Utilities & Phone Connectivity ---
     - plasma-firewall
     - kde-connect
-
-remove:
-  packages:
-    # Remove RPM Firefox in favor of sandboxed Flatpak
-    - firefox
-    - firefox-langpacks

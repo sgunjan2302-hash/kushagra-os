@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Kushagra OS Setup
+GenericName=System Setup Wizard
+Comment=Configure language, Wi-Fi, workspace layout, and user account
+Exec=/usr/bin/kushagra-setup
+Icon=/usr/share/kushagra-os/branding/logo-symbol.svg
+Categories=System;Settings;
+NoDisplay=true
+StartupNotify=true

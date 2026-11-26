@@ -1,0 +1,18 @@
+// Allow the transient kushagra-oobe setup user to configure Wi-Fi and run
+// Kushagra OS's scoped OOBE setup helper without interactive password prompts.
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "kushagra-oobe") {
+        return;
+    }
+
+    var allowedActions = [
+        "org.kushagraos.oobe.apply",
+        "org.freedesktop.NetworkManager.settings.modify.system",
+        "org.freedesktop.NetworkManager.network-control",
+        "org.freedesktop.NetworkManager.enable-disable-wifi"
+    ];
+
+    if (allowedActions.indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+});

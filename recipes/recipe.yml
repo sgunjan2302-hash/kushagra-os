@@ -25,6 +25,11 @@ modules:
         - pcscd.socket
         - avahi-daemon.socket
         - cups.socket
+        - livesys.service
+        - livesys-late.service
+        - kushagra-oobe.service
+      disabled:
+        - plasma-setup.service
 
   - from-file: flatpaks.yml
 

@@ -1,20 +1,23 @@
+import ast
 import glob
 import os
+import re
 import sys
 import xml.etree.ElementTree as ET
 import yaml
 
 results = []
 
+
 def record(name, status, detail):
     results.append({'name': name, 'status': status, 'detail': detail})
     print(f"[{status}] {name}: {detail}")
+
 
 # 1. Secret Safety
 git_ignored = open('.gitignore', 'r', encoding='utf-8').read()
 has_keys = all(k in git_ignored for k in ['*.key', '*.private', '*.secret', 'cosign.key'])
 
-# Verify via git that no private keys are tracked or staged
 tracked_sec_files = []
 try:
     import subprocess
@@ -97,15 +100,22 @@ for j in js_files:
 if js_ok:
     record('JS Layout API Validation', 'PASS', 'Both windows-classic.js and modern-floating.js use string lengthMode')
 
-# 6. Line Endings Check
-all_sh = glob.glob('files/scripts/*.sh') + ['files/system/usr/bin/kushagra-layout-switch', 'files/system/usr/bin/kushagra-health-check']
+# 6. Line Endings Check (scripts, OOBE Python/QML, systemd unit)
+lf_targets = (
+    glob.glob('files/scripts/*.sh')
+    + glob.glob('files/system/usr/bin/kushagra-*')
+    + glob.glob('files/system/usr/libexec/kushagra-*')
+    + glob.glob('files/system/usr/share/kushagra-os/oobe/*.py')
+    + glob.glob('files/system/usr/share/kushagra-os/oobe/*.qml')
+    + ['files/system/usr/lib/systemd/system/kushagra-oobe.service']
+)
 crlf_files = []
-for s in all_sh:
+for s in lf_targets:
     raw = open(s, 'rb').read()
     if b'\r' in raw:
         crlf_files.append(s)
 if not crlf_files:
-    record('LF Line Endings', 'PASS', f'All {len(all_sh)} scripts/executables have clean Unix LF')
+    record('LF Line Endings', 'PASS', f'All {len(lf_targets)} scripts/OOBE files have clean Unix LF')
 else:
     record('LF Line Endings', 'FAIL', f'CRLF detected in: {crlf_files}')
 
@@ -166,44 +176,81 @@ try:
 except Exception as e:
     record('UEFI Bootloader Resilience', 'FAIL', str(e))
 
-# 11. LiveCD Auto-Login Contract
+# 11. LiveCD-Only Autologin & Installed OS Security Isolation Contract (v0.1.9)
 try:
     sddm_autologin = 'files/system/etc/sddm.conf.d/autologin.conf'
     getty_autologin = 'files/system/etc/systemd/system/getty@tty1.service.d/autologin.conf'
-    tuning_sh = 'files/scripts/02-system-tuning.sh'
+    tuning_sh_path = 'files/scripts/02-system-tuning.sh'
 
-    has_sddm = os.path.exists(sddm_autologin) and 'User=liveuser' in open(sddm_autologin).read()
-    has_getty = os.path.exists(getty_autologin) and '--autologin liveuser' in open(getty_autologin).read()
-    has_user_prov = 'useradd' in open(tuning_sh).read() and 'liveuser' in open(tuning_sh).read() and 'livesys_session="kde"' in open(tuning_sh).read()
+    tuning_text = open(tuning_sh_path, 'r', encoding='utf-8').read()
+    active_lines = [ln.strip() for ln in tuning_text.splitlines() if ln.strip() and not ln.strip().startswith('#')]
 
-    if has_sddm and has_getty and has_user_prov:
-        record('LiveCD Auto-Login Contract', 'PASS', 'SDDM & agetty autologin configured; liveuser provisioned for KDE Plasma')
+    no_static_sddm = not os.path.exists(sddm_autologin)
+    no_static_getty = not os.path.exists(getty_autologin)
+    no_blank_root = not any('passwd -d root' in ln for ln in active_lines)
+    no_baked_liveuser = not any(re.search(r'\buseradd\b.*\bliveuser\b', ln) for ln in active_lines)
+    has_locked_root = any('passwd -l root' in ln for ln in active_lines)
+    has_livesys_kde = 'livesys_session="kde"' in tuning_text and 'livesys.service' in tuning_text
+    has_live_only_extra = '/var/lib/livesys/livesys-session-extra' in tuning_text
+
+    if (
+        no_static_sddm
+        and no_static_getty
+        and no_blank_root
+        and no_baked_liveuser
+        and has_locked_root
+        and has_livesys_kde
+        and has_live_only_extra
+    ):
+        record(
+            'LiveCD-Only Autologin Isolation',
+            'PASS',
+            'Static SDDM/TTY1 autologin & blank root removed; livesys handles rd.live.image sessions only',
+        )
     else:
-        record('LiveCD Auto-Login Contract', 'FAIL', f'has_sddm={has_sddm}, has_getty={has_getty}, has_user_prov={has_user_prov}')
+        record(
+            'LiveCD-Only Autologin Isolation',
+            'FAIL',
+            f'no_static_sddm={no_static_sddm}, no_static_getty={no_static_getty}, '
+            f'no_blank_root={no_blank_root}, no_baked_liveuser={no_baked_liveuser}, '
+            f'has_locked_root={has_locked_root}, has_livesys_kde={has_livesys_kde}, '
+            f'has_live_only_extra={has_live_only_extra}',
+        )
 except Exception as e:
-    record('LiveCD Auto-Login Contract', 'FAIL', str(e))
+    record('LiveCD-Only Autologin Isolation', 'FAIL', str(e))
 
-# 12. Graphical Dual-Boot Installer Contract
+# 12. Graphical Dual-Boot Installer & WebUI Browser Contract (v0.1.9)
 try:
-    pkgs_file = 'recipes/packages.yml'
+    pkgs_cfg = yaml.safe_load(open('recipes/packages.yml', 'r', encoding='utf-8'))
+    install_pkgs = pkgs_cfg.get('install', {}).get('packages', [])
+    remove_pkgs = pkgs_cfg.get('remove', {}).get('packages', [])
     desktop_launcher = 'files/system/etc/skel/Desktop/liveinst.desktop'
     just_file = 'files/system/usr/share/ublue-os/just/60-custom.just'
 
-    pkgs_text = open(pkgs_file).read()
-    has_anaconda = 'anaconda-live' in pkgs_text and 'partitionmanager' in pkgs_text
-    has_launcher = os.path.exists(desktop_launcher) and 'Exec=liveinst' in open(desktop_launcher).read()
-    has_just_recipe = 'install-to-disk' in open(just_file).read()
+    has_anaconda = 'anaconda-live' in install_pkgs and 'partitionmanager' in install_pkgs
+    has_firefox_webui = 'firefox' in install_pkgs and 'firefox' not in remove_pkgs
+    has_launcher = os.path.exists(desktop_launcher) and 'Exec=liveinst' in open(desktop_launcher, encoding='utf-8').read()
+    has_just_recipe = 'install-to-disk' in open(just_file, encoding='utf-8').read()
 
-    if has_anaconda and has_launcher and has_just_recipe:
-        record('Graphical Installer Contract', 'PASS', 'anaconda-live & partitionmanager in packages.yml; liveinst.desktop & ujust install-to-disk verified')
+    if has_anaconda and has_firefox_webui and has_launcher and has_just_recipe:
+        record(
+            'Graphical Installer & WebUI Contract',
+            'PASS',
+            'anaconda-live, partitionmanager & firefox RPM in packages.yml; liveinst.desktop & ujust install-to-disk verified',
+        )
     else:
-        record('Graphical Installer Contract', 'FAIL', f'has_anaconda={has_anaconda}, has_launcher={has_launcher}, has_just_recipe={has_just_recipe}')
+        record(
+            'Graphical Installer & WebUI Contract',
+            'FAIL',
+            f'has_anaconda={has_anaconda}, has_firefox_webui={has_firefox_webui}, '
+            f'has_launcher={has_launcher}, has_just_recipe={has_just_recipe}',
+        )
 except Exception as e:
-    record('Graphical Installer Contract', 'FAIL', str(e))
+    record('Graphical Installer & WebUI Contract', 'FAIL', str(e))
 
 # 13. Phase 2 Windows Compatibility & Storage Hygiene Contract
 try:
-    just_content = open('files/system/usr/share/ublue-os/just/60-custom.just').read()
+    just_content = open('files/system/usr/share/ublue-os/just/60-custom.just', 'r', encoding='utf-8').read()
     has_gaming = 'install-gaming:' in just_content
     has_ubuntu_box = 'box-ubuntu:' in just_content
     has_clean_disk = 'clean-disk:' in just_content
@@ -216,5 +263,78 @@ try:
 except Exception as e:
     record('Phase 2 Windows Compatibility Contract', 'FAIL', str(e))
 
-sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)
+# 14. Custom Qt6/QML First-Boot Setup Wizard (kushagra-setup OOBE) Contract
+try:
+    pkgs_cfg = yaml.safe_load(open('recipes/packages.yml', 'r', encoding='utf-8'))
+    recipe_cfg = yaml.safe_load(open('recipes/recipe.yml', 'r', encoding='utf-8'))
+    install_pkgs = pkgs_cfg.get('install', {}).get('packages', [])
+    systemd_mod = next((m for m in recipe_cfg.get('modules', []) if m.get('type') == 'systemd'), {})
+    sys_enabled = systemd_mod.get('system', {}).get('enabled', [])
+    sys_disabled = systemd_mod.get('system', {}).get('disabled', [])
 
+    required_oobe_files = [
+        'files/system/usr/bin/kushagra-setup',
+        'files/system/usr/share/kushagra-os/oobe/main.py',
+        'files/system/usr/share/kushagra-os/oobe/apply.py',
+        'files/system/usr/share/kushagra-os/oobe/Main.qml',
+        'files/system/usr/share/kushagra-os/oobe/kushagra-oobe-autostart.desktop',
+        'files/system/usr/share/applications/kushagra-setup.desktop',
+        'files/system/usr/share/kushagra-os/branding/logo-symbol.svg',
+        'files/system/usr/libexec/kushagra-setup-bootutil',
+        'files/system/usr/libexec/kushagra-oobe-apply',
+        'files/system/usr/libexec/kushagra-apply-user-layout',
+        'files/system/usr/lib/systemd/system/kushagra-oobe.service',
+        'files/system/usr/lib/sysusers.d/kushagra-oobe.conf',
+        'files/system/usr/lib/tmpfiles.d/kushagra-oobe.conf',
+        'files/system/etc/polkit-1/rules.d/50-kushagra-oobe.rules',
+        'files/system/usr/share/polkit-1/actions/org.kushagraos.oobe.policy',
+    ]
+    missing_oobe = [p for p in required_oobe_files if not os.path.exists(p)]
+
+    # AST-parse OOBE Python scripts
+    for py_path in [
+        'files/system/usr/share/kushagra-os/oobe/main.py',
+        'files/system/usr/share/kushagra-os/oobe/apply.py',
+    ]:
+        ast.parse(open(py_path, 'r', encoding='utf-8').read(), filename=py_path)
+
+    # XML-parse Polkit policy
+    ET.parse('files/system/usr/share/polkit-1/actions/org.kushagraos.oobe.policy')
+
+    unit_text = open('files/system/usr/lib/systemd/system/kushagra-oobe.service', 'r', encoding='utf-8').read()
+    tmpfiles_text = open('files/system/usr/lib/tmpfiles.d/kushagra-oobe.conf', 'r', encoding='utf-8').read()
+    bootutil_text = open('files/system/usr/libexec/kushagra-setup-bootutil', 'r', encoding='utf-8').read()
+    qml_text = open('files/system/usr/share/kushagra-os/oobe/Main.qml', 'r', encoding='utf-8').read()
+    tuning_text = open('files/scripts/02-system-tuning.sh', 'r', encoding='utf-8').read()
+
+    has_oobe_pkg = 'python3-pyqt6' in install_pkgs
+    has_systemd_cfg = 'kushagra-oobe.service' in sys_enabled and 'plasma-setup.service' in sys_disabled
+    has_unit_guards = (
+        'ConditionPathExists=/var/lib/kushagra-oobe-pending' in unit_text
+        and 'ConditionPathExists=!/etc/kushagra-oobe-done' in unit_text
+        and 'ConditionKernelCommandLine=!rd.live.image' in unit_text
+    )
+    has_tmpfiles_var = (
+        'f /var/lib/kushagra-oobe-pending 0644 root root - -' in tmpfiles_text
+        and 'C /var/lib/livesys/livesys-session-extra' in tmpfiles_text
+    )
+    has_uid_guard = '$3 >= 1000' in bootutil_text and '/var/lib/kushagra-oobe-pending' in tuning_text
+    has_all_screens = all(k in qml_text for k in ['en_IN', 'hi_IN', 'nmcli', 'Familiar Mode', 'Studio Mode', 'autoLoginSwitch', 'oobeBackend.finishSetup'])
+
+    if not missing_oobe and has_oobe_pkg and has_systemd_cfg and has_unit_guards and has_tmpfiles_var and has_uid_guard and has_all_screens:
+        record(
+            'Kushagra Setup OOBE Contract',
+            'PASS',
+            'Qt6/QML OOBE wizard, tmpfiles.d /var persistence, systemd bootutil guards, scoped Polkit helper, and recipe systemd settings verified',
+        )
+    else:
+        record(
+            'Kushagra Setup OOBE Contract',
+            'FAIL',
+            f'missing={missing_oobe}, has_oobe_pkg={has_oobe_pkg}, has_systemd_cfg={has_systemd_cfg}, '
+            f'has_unit_guards={has_unit_guards}, has_tmpfiles_var={has_tmpfiles_var}, has_uid_guard={has_uid_guard}, has_all_screens={has_all_screens}',
+        )
+except Exception as e:
+    record('Kushagra Setup OOBE Contract', 'FAIL', str(e))
+
+sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)

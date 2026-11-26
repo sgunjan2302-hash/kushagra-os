@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Scoped privileged OOBE backend invoked via pkexec by kushagra-oobe
+exec /usr/bin/python3 /usr/share/kushagra-os/oobe/apply.py "$@"

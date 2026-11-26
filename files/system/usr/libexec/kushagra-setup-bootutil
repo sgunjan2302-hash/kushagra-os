@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Pre-DisplayManager First-Boot OOBE Coordinator
+# Executed by kushagra-oobe.service ONLY when:
+#   - /var/lib/kushagra-oobe-pending exists
+#   - Kernel command line does NOT contain rd.live.image
+
+OOBE_FLAG="/var/lib/kushagra-oobe-pending"
+OOBE_DONE="/etc/kushagra-oobe-done"
+OOBE_AUTOLOGIN_CONF="/etc/plasmalogin.conf.d/00-kushagra-oobe.conf"
+
+cleanup_oobe_state() {
+    touch "${OOBE_DONE}" || true
+    rm -f "${OOBE_AUTOLOGIN_CONF}" "${OOBE_FLAG}"
+    systemctl disable kushagra-oobe.service 2>/dev/null || true
+}
+
+# Double-check kernel cmdline even if run manually
+if grep -qw "rd.live.image" /proc/cmdline 2>/dev/null; then
+    rm -f "${OOBE_AUTOLOGIN_CONF}" "${OOBE_FLAG}"
+    exit 0
+fi
+
+if [ -f "${OOBE_DONE}" ] || [ ! -f "${OOBE_FLAG}" ]; then
+    rm -f "${OOBE_AUTOLOGIN_CONF}"
+    exit 0
+fi
+
+# Detect any existing human user (UID 1000..65533 excluding LiveCD liveuser)
+EXISTING_HUMAN_USERS=$(awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "liveuser" && $1 != "nobody" {print $1}' /etc/passwd || true)
+if [ -n "${EXISTING_HUMAN_USERS}" ]; then
+    echo "Existing human account detected (${EXISTING_HUMAN_USERS}); skipping Kushagra OOBE."
+    touch /etc/plasma-setup-done || true
+    cleanup_oobe_state
+    exit 0
+fi
+
+# Ensure dedicated kushagra-oobe system user & runtime config exist
+if command -v systemd-sysusers >/dev/null 2>&1 && [ -f /usr/lib/sysusers.d/kushagra-oobe.conf ]; then
+    systemd-sysusers /usr/lib/sysusers.d/kushagra-oobe.conf || true
+fi
+
+if command -v systemd-tmpfiles >/dev/null 2>&1 && [ -f /usr/lib/tmpfiles.d/kushagra-oobe.conf ]; then
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/kushagra-oobe.conf || true
+fi
+
+# Suppress KDE's upstream plasma-setup.service
+touch /etc/plasma-setup-done || true
+
+# Stage temporary plasmalogin autologin directly into the OOBE wizard session
+mkdir -p /etc/plasmalogin.conf.d
+cat << 'EOF' > "${OOBE_AUTOLOGIN_CONF}"
+[Autologin]
+User=kushagra-oobe
+Session=plasma.desktop
+Relogin=false
+EOF
+chmod 0644 "${OOBE_AUTOLOGIN_CONF}"
