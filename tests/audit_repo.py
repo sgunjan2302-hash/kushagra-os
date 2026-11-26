@@ -113,8 +113,14 @@ lf_targets = (
     + [
         'files/system/usr/share/kushagra-os/livesys/livesys-session-extra',
         'files/system/usr/lib/systemd/system/kushagra-oobe.service',
+        'files/system/usr/lib/tmpfiles.d/kushagra-oobe.conf',
         'files/system/etc/anaconda/profile.d/kushagra-os.conf',
         'files/system/etc/xdg/mimeapps.list',
+        'files/system/etc/issue.net',
+        'files/system/etc/systemd/system/system-flatpak-setup.service.d/10-skip-livecd.conf',
+        'files/system/etc/systemd/system/system-flatpak-setup.timer.d/10-skip-livecd.conf',
+        'files/system/etc/systemd/system/bootloader-update.service.d/10-kushagra-live-guard.conf',
+        'files/system/usr/share/ublue-os/just/60-custom.just',
     ]
 )
 crlf_files = []
@@ -324,30 +330,45 @@ try:
         and 'ConditionPathExists=!/etc/kushagra-oobe-done' in unit_text
         and 'ConditionKernelCommandLine=!rd.live.image' in unit_text
     )
+    tmpfiles_active = [ln.strip() for ln in tmpfiles_text.splitlines() if ln.strip() and not ln.strip().startswith('#')]
+    tuning_active = [ln.strip() for ln in tuning_text.splitlines() if ln.strip() and not ln.strip().startswith('#')]
     has_tmpfiles_var = (
-        'f /var/lib/kushagra-oobe-pending 0644 root root - -' in tmpfiles_text
-        and 'C /var/lib/livesys/livesys-session-extra' in tmpfiles_text
+        not any('kushagra-oobe-pending' in ln for ln in tmpfiles_active)
+        and any('C /var/lib/livesys/livesys-session-extra' in ln for ln in tmpfiles_active)
     )
-    has_uid_guard = '$3 >= 1000' in bootutil_text and '/var/lib/kushagra-oobe-pending' in tuning_text
+    has_uid_guard = (
+        '$3 >= 1000' in bootutil_text
+        and not any('kushagra-oobe-pending' in ln for ln in tuning_active)
+    )
+    oobe_main_txt = open('files/system/usr/share/kushagra-os/oobe/main.py', 'r', encoding='utf-8').read()
+    oobe_apply_txt = open('files/system/usr/share/kushagra-os/oobe/apply.py', 'r', encoding='utf-8').read()
+    layout_sh_txt = open('files/system/usr/libexec/kushagra-apply-user-layout', 'r', encoding='utf-8').read()
+    has_v021_oobe = (
+        'QQuickStyle.setStyle("Basic")' in oobe_main_txt
+        and 'kushagra-oobe-handoff' in oobe_apply_txt
+        and 'qdbus-qt6' in layout_sh_txt
+        and '(`wheel`)' not in qml_text
+    )
     has_all_screens = all(k in qml_text for k in ['en_IN', 'hi_IN', 'nmcli', 'Familiar Mode', 'Studio Mode', 'autoLoginSwitch', 'oobeBackend.finishSetup'])
 
-    if not missing_oobe and has_oobe_pkg and has_systemd_cfg and has_unit_guards and has_tmpfiles_var and has_uid_guard and has_all_screens:
+    if not missing_oobe and has_oobe_pkg and has_systemd_cfg and has_unit_guards and has_tmpfiles_var and has_uid_guard and has_v021_oobe and has_all_screens:
         record(
             'Kushagra Setup OOBE Contract',
             'PASS',
-            'Qt6/QML OOBE wizard, tmpfiles.d /var persistence, systemd bootutil guards, scoped Polkit helper, and recipe systemd settings verified',
+            'Qt6/QML OOBE wizard, clean tmpfiles.d/kushagra-oobe.conf, systemd handoff, qdbus-qt6 layout switcher, and recipe settings verified',
         )
     else:
         record(
             'Kushagra Setup OOBE Contract',
             'FAIL',
             f'missing={missing_oobe}, has_oobe_pkg={has_oobe_pkg}, has_systemd_cfg={has_systemd_cfg}, '
-            f'has_unit_guards={has_unit_guards}, has_tmpfiles_var={has_tmpfiles_var}, has_uid_guard={has_uid_guard}, has_all_screens={has_all_screens}',
+            f'has_unit_guards={has_unit_guards}, has_tmpfiles_var={has_tmpfiles_var}, has_uid_guard={has_uid_guard}, '
+            f'has_v021_oobe={has_v021_oobe}, has_all_screens={has_all_screens}',
         )
 except Exception as e:
     record('Kushagra Setup OOBE Contract', 'FAIL', str(e))
 
-# 15. Stage 1 Custom Qt6/QML K-Installer Contract (v0.2.0)
+# 15. Stage 1 Custom Qt6/QML K-Installer Contract (v0.2.0 + v0.2.1 bootc/ESP/GPT fixes)
 try:
     required_installer_files = [
         'files/system/usr/bin/kushagra-installer',
@@ -392,23 +413,42 @@ try:
         and 'ESP_PARTTYPES' in probe_txt
         and 'MIN_ESP_FREE_MIB = 35' in probe_txt
         and 'detect_live_disk_paths' in probe_txt
+        and 'os.path.basename' in probe_txt
+        and 'needsInitGpt' in probe_txt
     )
     has_ks_handoff = (
         'clearpart --none' in ks_txt
         and 'rootpw --lock' in ks_txt
         and 'firstboot --disable' in ks_txt
         and '/var/lib/kushagra-oobe-pending' in ks_txt
+        and 'bootloader --location=none' in ks_txt
+        and '/var/home' in ks_txt
+        and 'grub2-editenv' in ks_txt
+        and 'efibootmgr' in ks_txt
+        and '/boot/efi/EFI/fedora/grub.cfg' in ks_txt
+        and 'vmlinuz' in ks_txt
         and not re.search(r'^\s*user\s+', ks_txt, re.MULTILINE)
     )
-    has_anaconda_cmd = '--liveinst' in backend_txt and '--cmdline' in backend_txt and '--kickstart' in backend_txt
+    has_anaconda_cmd = (
+        '--liveinst' not in backend_txt
+        and '--cmdline' in backend_txt
+        and '--kickstart' in backend_txt
+        and 'DBUS_SESSION_BUS_ADDRESS' in backend_txt
+    )
     has_qml_screens = all(k in inst_qml for k in ['Install Kushagra OS', 'Try Live Desktop', 'installLogsText', 'espLowSpace'])
-    has_livesys_kiosk = 'kushagra-installer.desktop' in livesys_extra and 'org.kde.plasma-welcome.desktop' in livesys_extra
+    has_livesys_kiosk = (
+        'kushagra-installer.desktop' in livesys_extra
+        and 'org.kde.plasma-welcome.desktop' in livesys_extra
+        and 'chown -R liveuser:liveuser /home/liveuser' in livesys_extra
+        and 'plasma-welcomerc' in livesys_extra
+        and 'drkonqi' in livesys_extra
+    )
 
     if not missing_inst and has_live_gate and has_profile and has_safety_locks and has_ks_handoff and has_anaconda_cmd and has_qml_screens and has_livesys_kiosk:
         record(
             'Kushagra K-Installer Stage 1 Contract',
             'PASS',
-            'LiveCD kiosk gate, storage/Windows/EFI locks, Anaconda cmdline Kickstart backend, log drawer & OOBE handoff verified',
+            'LiveCD kiosk gate, storage/Windows/EFI locks, Anaconda cmdline Kickstart backend, bootc GRUB2/EFI staging & OOBE handoff verified',
         )
     else:
         record(
@@ -476,5 +516,47 @@ try:
         )
 except Exception as e:
     record('Universal App Layer Contract', 'FAIL', str(e))
+
+# 17. v0.2.1 LiveCD Systemd Guards, Bottles/Gaming & Branding Contract
+try:
+    sf_svc = open('files/system/etc/systemd/system/system-flatpak-setup.service.d/10-skip-livecd.conf', 'r', encoding='utf-8').read()
+    sf_tmr = open('files/system/etc/systemd/system/system-flatpak-setup.timer.d/10-skip-livecd.conf', 'r', encoding='utf-8').read()
+    bl_svc = open('files/system/etc/systemd/system/bootloader-update.service.d/10-kushagra-live-guard.conf', 'r', encoding='utf-8').read()
+    winrun_py = open('files/system/usr/share/kushagra-os/winrun/main.py', 'r', encoding='utf-8').read()
+    just_cfg = open('files/system/usr/share/ublue-os/just/60-custom.just', 'r', encoding='utf-8').read()
+    recipe_raw = open('recipes/recipe.yml', 'r', encoding='utf-8').read()
+    issue_raw = open('files/system/etc/issue.net', 'r', encoding='utf-8').read()
+
+    has_live_guards = (
+        'ConditionKernelCommandLine=!rd.live.image' in sf_svc
+        and 'ConditionKernelCommandLine=!rd.live.image' in sf_tmr
+        and 'ConditionKernelCommandLine=!rd.live.image' in bl_svc
+        and 'ConditionPathExists=/sysroot/ostree' in bl_svc
+    )
+    has_app_fixes = (
+        'find_existing_bottle' in winrun_py
+        and 'flatpak install --system' in just_cfg
+    )
+    has_v021_branding = (
+        'v0.2.1' in recipe_raw
+        and 'v0.1 Prototype' not in recipe_raw
+        and 'v0.2.1' in issue_raw
+        and 'v0.1 Prototype' not in issue_raw
+    )
+
+    if has_live_guards and has_app_fixes and has_v021_branding:
+        record(
+            'v0.2.1 LiveCD Guards & Branding Contract',
+            'PASS',
+            'LiveCD flatpak/bootloader guards, Bottles/system gaming fixes, and v0.2.1 branding verified',
+        )
+    else:
+        record(
+            'v0.2.1 LiveCD Guards & Branding Contract',
+            'FAIL',
+            f'has_live_guards={has_live_guards}, has_app_fixes={has_app_fixes}, has_v021_branding={has_v021_branding}',
+        )
+except Exception as e:
+    record('v0.2.1 LiveCD Guards & Branding Contract', 'FAIL', str(e))
 
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)

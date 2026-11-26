@@ -5,7 +5,7 @@ echo "liveuser ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/90-liveuser
 chmod 0440 /etc/sudoers.d/90-liveuser
 
 # Ensure Fcitx5 Wayland config is preserved alongside Anaconda locale tracking on liveuser
-mkdir -p /home/liveuser/.config /home/liveuser/.config/autostart /home/liveuser/Desktop /home/liveuser/.local/share/applications
+mkdir -p /home/liveuser/.config /home/liveuser/.config/autostart /home/liveuser/.config/systemd/user /home/liveuser/Desktop /home/liveuser/.local/share/applications
 cat << 'KWIN_EOF' > /home/liveuser/.config/kwinrc
 [Wayland]
 FollowLocale1=true
@@ -21,8 +21,23 @@ Name=Plasma Welcome
 Hidden=true
 WELCOME_EOF
 
+cat << 'WELCOMERC_EOF' > /home/liveuser/.config/plasma-welcomerc
+[General]
+LastSeenVersion=6.8.0
+ShowUpdatePage=false
+WELCOMERC_EOF
+
+# Suppress DrKonqi coredump popup and user socket on LiveCD
+cat << 'DRKONQI_EOF' > /home/liveuser/.config/autostart/org.kde.drkonqi.coredump.gui.desktop
+[Desktop Entry]
+Type=Application
+Name=DrKonqi Coredump GUI
+Hidden=true
+DRKONQI_EOF
+ln -sf /dev/null /home/liveuser/.config/systemd/user/drkonqi-coredump-launcher.socket
+
 # Replace generic liveinst Desktop icon with branded Kushagra K-Installer shortcut on LiveCD
-rm -f /home/liveuser/Desktop/liveinst.desktop /home/liveuser/.local/share/applications/liveinst.desktop
+rm -f /home/liveuser/Desktop/liveinst.desktop /home/liveuser/.local/share/applications/liveinst.desktop /home/liveuser/.config/autostart/liveinst.desktop
 if [ -f /usr/share/applications/kushagra-installer.desktop ]; then
     cp -f /usr/share/applications/kushagra-installer.desktop /home/liveuser/Desktop/kushagra-installer.desktop
     chmod 0755 /home/liveuser/Desktop/kushagra-installer.desktop
@@ -32,6 +47,9 @@ cat << 'MENU_EOF' > /home/liveuser/.config/kickoffrc
 [Favorites]
 FavoriteURLs=/usr/share/applications/org.mozilla.firefox.desktop,/usr/share/applications/org.kde.dolphin.desktop,/usr/share/applications/systemsettings.desktop,/usr/share/applications/org.kde.konsole.desktop,/usr/share/applications/kushagra-installer.desktop
 MENU_EOF
+
+# Ensure liveuser owns all seeded config, autostart, desktop shortcuts, and systemd masks
+chown -R liveuser:liveuser /home/liveuser
 
 # Suppress Kushagra OOBE wizard during LiveCD sessions
 rm -f /var/lib/kushagra-oobe-pending

@@ -5,5 +5,5 @@ Comment=Auto-launch K-Installer fullscreen during LiveCD sessions
 Exec=/usr/libexec/kushagra-installer-autostart
 Icon=/usr/share/kushagra-os/branding/logo-symbol.svg
 NoDisplay=true
-X-KDE-autostart-phase=1
+X-KDE-autostart-phase=2
 StartupNotify=false

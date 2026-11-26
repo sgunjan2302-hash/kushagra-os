@@ -86,19 +86,38 @@ setup-waydroid ACTION="setup":
     sudo firewall-cmd --zone=trusted --add-forward --permanent 2>/dev/null || true
     sudo firewall-cmd --reload
 
-    # Check for NVIDIA graphics to configure software EGL/SwiftShader fallback
-    if lspci -nn | grep -Ei "vga|3d" | grep -iq "nvidia"; then
-        echo "NVIDIA GPU detected: Configuring SwiftShader software rendering fallback for Waydroid..."
-        sudo mkdir -p /var/lib/waydroid
-        if [ -f "/var/lib/waydroid/waydroid.cfg" ]; then
-            sudo sed -i 's/^ro.hardware.gralloc=.*/ro.hardware.gralloc=default/' /var/lib/waydroid/waydroid.cfg || true
-            sudo sed -i 's/^ro.hardware.egl=.*/ro.hardware.egl=swiftshader/' /var/lib/waydroid/waydroid.cfg || true
-        fi
-    fi
-
     echo "Initializing Waydroid system container..."
     sudo waydroid init || echo "Waydroid already initialized or requires network access."
     sudo systemctl restart waydroid-container.service || true
+
+    # Check for NVIDIA graphics after waydroid init so waydroid.cfg exists to patch
+    if ! command -v lspci >/dev/null 2>&1; then
+        echo "Note: 'lspci' not found; skipping automatic NVIDIA Waydroid GPU check."
+    elif lspci -nn | grep -Ei "vga|3d|display" | grep -iq "nvidia"; then
+        echo "NVIDIA GPU detected: Configuring SwiftShader software rendering fallback for Waydroid..."
+        if [ -f "/var/lib/waydroid/waydroid.cfg" ]; then
+            if grep -Eq '^ro\.hardware\.gralloc[[:space:]]*=' /var/lib/waydroid/waydroid.cfg; then
+                sudo sed -i -E 's/^ro\.hardware\.gralloc[[:space:]]*=.*/ro.hardware.gralloc=default/' /var/lib/waydroid/waydroid.cfg
+            else
+                if ! grep -Eq '^\[properties\][[:space:]]*$' /var/lib/waydroid/waydroid.cfg; then
+                    printf '\n[properties]\n' | sudo tee -a /var/lib/waydroid/waydroid.cfg >/dev/null
+                fi
+                sudo sed -i -E '/^\[properties\][[:space:]]*$/a ro.hardware.gralloc=default' /var/lib/waydroid/waydroid.cfg
+            fi
+            if grep -Eq '^ro\.hardware\.egl[[:space:]]*=' /var/lib/waydroid/waydroid.cfg; then
+                sudo sed -i -E 's/^ro\.hardware\.egl[[:space:]]*=.*/ro.hardware.egl=swiftshader/' /var/lib/waydroid/waydroid.cfg
+            else
+                if ! grep -Eq '^\[properties\][[:space:]]*$' /var/lib/waydroid/waydroid.cfg; then
+                    printf '\n[properties]\n' | sudo tee -a /var/lib/waydroid/waydroid.cfg >/dev/null
+                fi
+                sudo sed -i -E '/^\[properties\][[:space:]]*$/a ro.hardware.egl=swiftshader' /var/lib/waydroid/waydroid.cfg
+            fi
+            sudo waydroid upgrade --offline 2>/dev/null || true
+            sudo systemctl restart waydroid-container.service || true
+        else
+            echo "Warning: /var/lib/waydroid/waydroid.cfg does not exist yet; initialize Waydroid with network access and re-run 'ujust setup-waydroid'."
+        fi
+    fi
 
     # Apply multi-window property when container session property daemon responds
     if waydroid prop set persist.waydroid.multi_windows true 2>/dev/null || sudo waydroid prop set persist.waydroid.multi_windows true 2>/dev/null; then
@@ -206,11 +225,11 @@ install-gaming:
     set -euo pipefail
     echo "=== Installing Kushagra OS Windows Gaming Stack ==="
     echo "Staging Steam, Heroic Games Launcher, MangoHud & Gamescope via Flathub..."
-    flatpak install --user -y flathub \
+    flatpak install --system -y flathub \
         com.valvesoftware.Steam \
         com.heroicgames.launcher \
         org.freedesktop.Platform.VulkanLayer.MangoHud \
-        com.valvesoftware.Steam.Utility.gamescope || true
+        com.valvesoftware.Steam.Utility.gamescope
     echo "Gaming stack staged successfully."
     echo "Proton-GE and Wine translation layers are ready via Steam and Bottles."
 

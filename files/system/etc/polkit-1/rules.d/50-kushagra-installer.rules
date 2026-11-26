@@ -4,7 +4,7 @@ polkit.addRule(function (action, subject) {
     if (action.id !== "org.kushagraos.installer.run") {
         return;
     }
-    if (subject.user === "liveuser" && subject.local && subject.active) {
+    if (subject.user === "liveuser" && subject.local) {
         return polkit.Result.YES;
     }
 });

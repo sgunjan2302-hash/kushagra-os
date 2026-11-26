@@ -25,6 +25,73 @@ Window {
     palette.buttonText: "#FFFFFF"
     palette.button: "#1E293B"
 
+    component GlassButton: Button {
+        id: btn
+        implicitWidth: Math.max(64, btnLabel.implicitWidth + leftPadding + rightPadding)
+        implicitHeight: 40
+        leftPadding: 16
+        rightPadding: 16
+        topPadding: 8
+        bottomPadding: 8
+        font.pixelSize: 13
+        font.weight: btn.highlighted ? Font.Bold : Font.Medium
+        opacity: btn.enabled ? 1.0 : 0.45
+
+        background: Rectangle {
+            radius: 10
+            color: btn.highlighted
+                   ? (btn.down ? "#55FF9933" : (btn.hovered ? "#44FF9933" : "#30FF9933"))
+                   : (btn.down ? "#2B3A55" : (btn.hovered ? "#28FFFFFF" : "#18FFFFFF"))
+            border.color: btn.highlighted ? "#FF9933" : "#38FFFFFF"
+            border.width: btn.highlighted ? 1.5 : 1
+        }
+
+        contentItem: Text {
+            id: btnLabel
+            text: btn.text
+            font: btn.font
+            color: btn.enabled ? "#FFFFFF" : "#94A3B8"
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+        }
+    }
+
+    component GlassCheckBox: CheckBox {
+        id: cb
+        spacing: 12
+        font.pixelSize: 13
+
+        indicator: Rectangle {
+            implicitWidth: 22
+            implicitHeight: 22
+            x: cb.leftPadding
+            y: parent.height / 2 - height / 2
+            radius: 6
+            color: cb.checked ? "#FF9933" : "#1E293B"
+            border.color: cb.checked ? "#FF9933" : (cb.hovered ? "#FF9933" : "#64748B")
+            border.width: 2
+
+            Text {
+                anchors.centerIn: parent
+                visible: cb.checked
+                text: "✓"
+                color: "#060913"
+                font.pixelSize: 14
+                font.weight: Font.Bold
+            }
+        }
+
+        contentItem: Text {
+            text: cb.text
+            font: cb.font
+            color: "#FFFFFF"
+            wrapMode: Text.WordWrap
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: cb.indicator.width + cb.spacing
+        }
+    }
+
     Connections {
         target: installerBackend
         function onRecommendedTargetIdChanged() {
@@ -56,6 +123,7 @@ Window {
                 }
             }
         }
+        root.selectedTarget = null
     }
 
     function segmentColor(seg) {
@@ -136,12 +204,14 @@ Window {
 
                 Row {
                     spacing: 6
-                    Button {
+                    GlassButton {
+                        implicitHeight: 34
                         text: "EN"
                         highlighted: root.uiLang === "en_IN"
                         onClicked: root.uiLang = "en_IN"
                     }
-                    Button {
+                    GlassButton {
+                        implicitHeight: 34
                         text: "हिन्दी"
                         highlighted: root.uiLang === "hi_IN"
                         onClicked: root.uiLang = "hi_IN"
@@ -216,7 +286,7 @@ Window {
                                     color: "#E2E8F0"; font.pixelSize: 13; lineHeight: 1.4; wrapMode: Text.WordWrap; Layout.fillWidth: true
                                 }
                                 Item { Layout.fillHeight: true }
-                                Button {
+                                GlassButton {
                                     text: isHindi ? "ड्राइव चयन पर जाएं →" : "Install Kushagra OS →"
                                     highlighted: true
                                     Layout.fillWidth: true
@@ -250,7 +320,7 @@ Window {
                                     color: "#CBD5E1"; font.pixelSize: 13; lineHeight: 1.4; wrapMode: Text.WordWrap; Layout.fillWidth: true
                                 }
                                 Item { Layout.fillHeight: true }
-                                Button {
+                                GlassButton {
                                     text: isHindi ? "लाइव डेस्कटॉप पर जाएं" : "Try Live Desktop"
                                     Layout.fillWidth: true
                                     onClicked: installerBackend.tryLiveDesktop()
@@ -268,7 +338,7 @@ Window {
                             color: "#94A3B8"; font.pixelSize: 12
                         }
                         Item { Layout.fillWidth: true }
-                        Button {
+                        GlassButton {
                             text: isHindi ? "क्लासिक Anaconda खोलें (liveinst)" : "Classic Anaconda (liveinst)"
                             onClicked: installerBackend.launchClassicAnaconda()
                         }
@@ -297,7 +367,7 @@ Window {
                             }
                         }
                         Item { Layout.fillWidth: true }
-                        Button {
+                        GlassButton {
                             text: installerBackend.scanning ? (isHindi ? "स्कैन..." : "Scanning...") : (isHindi ? "रीफ्रेश ड्राइव" : "Refresh Drives")
                             enabled: !installerBackend.scanning
                             onClicked: installerBackend.scanDrives()
@@ -306,32 +376,37 @@ Window {
 
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 38
+                        Layout.preferredHeight: Math.max(38, scanErrLabel.implicitHeight + 16)
                         radius: 10
                         visible: installerBackend.scanError.length > 0
                         color: "#33F59E0B"
                         border.color: "#F59E0B"
                         Text {
+                            id: scanErrLabel
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.left: parent.left; anchors.leftMargin: 12
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.margins: 12
+                            wrapMode: Text.WordWrap
                             color: "#FDE68A"; font.pixelSize: 12
                             text: installerBackend.scanError
                         }
                     }
 
                     ScrollView {
+                        id: diskScrollView
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
 
                         ColumnLayout {
-                            width: glassCard.width - 84
+                            width: Math.max(200, diskScrollView.availableWidth)
                             spacing: 14
 
                             Repeater {
                                 model: installerBackend.disks
 
                                 delegate: Rectangle {
+                                    id: diskCard
+                                    property real diskTotalBytes: Math.max(1, Number(modelData.sizeBytes || 1))
                                     Layout.fillWidth: true
                                     implicitHeight: diskCol.implicitHeight + 24
                                     radius: 14
@@ -347,7 +422,7 @@ Window {
                                         RowLayout {
                                             Layout.fillWidth: true
                                             Text {
-                                                text: modelData.model + " · " + modelData.path + " (" + modelData.sizeLabel + ", " + modelData.pttype.toUpperCase() + ")"
+                                                text: (modelData.model || "Local Disk") + " · " + modelData.path + " (" + modelData.sizeLabel + ", " + (modelData.pttype || "unknown").toUpperCase() + ")"
                                                 color: "#FFFFFF"; font.pixelSize: 14; font.weight: Font.Bold
                                             }
                                             Item { Layout.fillWidth: true }
@@ -368,7 +443,9 @@ Window {
                                                 model: modelData.segments || []
                                                 delegate: Rectangle {
                                                     Layout.fillWidth: true
-                                                    Layout.preferredWidth: Math.max(24, Math.round((modelData.sizeBytes / 1073741824) * 4))
+                                                    Layout.minimumWidth: 18
+                                                    Layout.maximumWidth: 520
+                                                    Layout.preferredWidth: Math.max(24, Math.min(480, Math.round(((modelData.sizeBytes || 0) / diskCard.diskTotalBytes) * 760)))
                                                     height: 16
                                                     radius: 4
                                                     color: root.segmentColor(modelData)
@@ -413,7 +490,7 @@ Window {
                                                             text: (modelData.isLocked ? "🔒 " : (modelData.recommended ? "★ " : "• "))
                                                                   + modelData.badgeText
                                                                   + (modelData.fstype && modelData.fstype !== "free" ? (" (" + modelData.fstype + ")") : "")
-                                                                  + (modelData.isEsp && modelData.espFreeMib !== null ? (" · " + modelData.espFreeMib + " MiB free") : "")
+                                                                  + (modelData.isEsp && modelData.espFreeMib !== null && modelData.espFreeMib !== undefined ? (" · " + modelData.espFreeMib + " MiB free") : "")
                                                             color: modelData.recommended ? "#4ADE80" : (modelData.isEsp && modelData.espLowSpace ? "#FBBF24" : "#94A3B8")
                                                             font.pixelSize: 11
                                                         }
@@ -456,9 +533,11 @@ Window {
                             anchors.left: parent.left; anchors.right: parent.right; anchors.margins: 12
                             wrapMode: Text.WordWrap
                             color: "#FDE68A"; font.pixelSize: 12
-                            text: isHindi
-                                  ? ("चेतावनी: मौजूदा EFI पार्टीशन (" + root.selectedTarget.espPath + ") में केवल " + root.selectedTarget.espFreeMib + " MiB खाली है (< 35 MiB)। ड्यूल-बूट बूटलोडर के लिए ~35 MiB खाली जगह ज़रूरी होती है।")
-                                  : ("Warning: Preserved EFI partition (" + root.selectedTarget.espPath + ") only has " + root.selectedTarget.espFreeMib + " MiB free (< 35 MiB recommended). Dual-boot bootloader entries may fail if EFI runs full.")
+                            text: root.selectedTarget
+                                  ? (isHindi
+                                     ? ("चेतावनी: मौजूदा EFI पार्टीशन (" + (root.selectedTarget.espPath || "") + ") में केवल " + (root.selectedTarget.espFreeMib !== null && root.selectedTarget.espFreeMib !== undefined ? root.selectedTarget.espFreeMib : "?") + " MiB खाली है (< 35 MiB)। ड्यूल-बूट बूटलोडर के लिए ~35 MiB खाली जगह ज़रूरी होती है।")
+                                     : ("Warning: Preserved EFI partition (" + (root.selectedTarget.espPath || "") + ") only has " + (root.selectedTarget.espFreeMib !== null && root.selectedTarget.espFreeMib !== undefined ? root.selectedTarget.espFreeMib : "?") + " MiB free (< 35 MiB recommended). Dual-boot bootloader entries may fail if EFI runs full."))
+                                  : ""
                         }
                     }
                 }
@@ -526,17 +605,20 @@ Window {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: parent.left; anchors.right: parent.right; anchors.margins: 14
                             color: "#FCA5A5"; font.pixelSize: 12; wrapMode: Text.WordWrap
-                            text: isHindi
-                                  ? ("चेतावनी: केवल " + root.selectedTarget.partPath + " पर मौजूद डेटा मिटाकर Btrfs बनाया जाएगा। Windows NTFS व EFI नहीं छेड़े जाएंगे।")
-                                  : ("Caution: Only " + root.selectedTarget.partPath + " will be formatted for Kushagra OS. Windows NTFS and EFI remain untouched.")
+                            text: root.selectedTarget
+                                  ? (isHindi
+                                     ? ("चेतावनी: केवल " + (root.selectedTarget.partPath || "") + " पर मौजूद डेटा मिटाकर Btrfs बनाया जाएगा। Windows NTFS व EFI नहीं छेड़े जाएंगे।")
+                                     : ("Caution: Only " + (root.selectedTarget.partPath || "") + " will be formatted for Kushagra OS. Windows NTFS and EFI remain untouched."))
+                                  : ""
                         }
                     }
 
-                    CheckBox {
+                    GlassCheckBox {
                         id: confirmBox
+                        Layout.fillWidth: true
                         checked: root.confirmChecked
                         text: root.selectedTarget && root.selectedTarget.kind === "partition"
-                              ? (isHindi ? ("मैं पुष्टि करता हूँ कि केवल " + root.selectedTarget.partPath + " फॉर्मेट हो और इंस्टॉलेशन शुरू हो।") : ("I confirm formatting ONLY " + root.selectedTarget.partPath + " while preserving all other partitions."))
+                              ? (isHindi ? ("मैं पुष्टि करता हूँ कि केवल " + (root.selectedTarget.partPath || "") + " फॉर्मेट हो और इंस्टॉलेशन शुरू हो।") : ("I confirm formatting ONLY " + (root.selectedTarget.partPath || "") + " while preserving all other partitions."))
                               : (isHindi ? "मैं जांच किए गए खाली स्थान पर Kushagra OS इंस्टॉल करने की पुष्टि करता हूँ।" : "I confirm installing Kushagra OS into the selected unallocated free space.")
                         onToggled: root.confirmChecked = checked
                     }
@@ -589,7 +671,7 @@ Window {
                             color: "#94A3B8"; font.pixelSize: 13; font.weight: Font.Bold
                         }
                         Item { Layout.fillWidth: true }
-                        Button {
+                        GlassButton {
                             text: root.logsExpanded
                                   ? (isHindi ? "लॉग छुपाएं ▲" : "Hide Installation Logs ▲")
                                   : (isHindi ? "इंस्टॉलेशन लॉग देखें ▼" : "View Installation Logs ▼")
@@ -646,13 +728,13 @@ Window {
                 Layout.fillWidth: true
                 spacing: 12
 
-                Button {
+                GlassButton {
                     visible: (root.currentStep === 1 || root.currentStep === 2) && !installerBackend.installing
                     text: isHindi ? "← पीछे" : "← Back"
                     onClicked: root.currentStep -= 1
                 }
 
-                Button {
+                GlassButton {
                     visible: root.currentStep === 3 && installerBackend.installError.length > 0 && !installerBackend.installing
                     text: isHindi ? "← वापस ड्राइव चुनें" : "← Return to Target Selection"
                     onClicked: root.currentStep = 1
@@ -660,7 +742,7 @@ Window {
 
                 Item { Layout.fillWidth: true }
 
-                Button {
+                GlassButton {
                     visible: root.currentStep === 1
                     highlighted: true
                     enabled: root.selectedTarget !== null && !installerBackend.scanning
@@ -668,24 +750,25 @@ Window {
                     onClicked: root.currentStep = 2
                 }
 
-                Button {
+                GlassButton {
                     visible: root.currentStep === 2
                     highlighted: true
                     enabled: root.selectedTarget !== null && root.confirmChecked
                     text: isHindi ? "इंस्टॉल शुरू करें ✓" : "Install Kushagra OS ✓"
                     onClicked: {
+                        if (!root.selectedTarget) return
                         root.currentStep = 3
                         installerBackend.startInstall(root.selectedTarget.id)
                     }
                 }
 
-                Button {
+                GlassButton {
                     visible: root.currentStep === 3 && installerBackend.installSucceeded
                     text: isHindi ? "लाइव डेस्कटॉप पर जाएं" : "Continue Live Desktop"
                     onClicked: installerBackend.tryLiveDesktop()
                 }
 
-                Button {
+                GlassButton {
                     visible: root.currentStep === 3 && installerBackend.installSucceeded
                     highlighted: true
                     text: isHindi ? "अभी रीस्टार्ट करें ↻" : "Restart System Now ↻"

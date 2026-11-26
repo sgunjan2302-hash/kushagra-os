@@ -18,9 +18,9 @@ topBar.floating = false;
 topBar.hiding = "none";
 
 topBar.addWidget("org.kde.plasma.kickoff");
-topBar.addWidget("org.kde.plasma.marginsseparator");
+topBar.addWidget("org.kde.plasma.panelspacer");
 topBar.addWidget("org.kde.plasma.digitalclock");
-topBar.addWidget("org.kde.plasma.marginsseparator");
+topBar.addWidget("org.kde.plasma.panelspacer");
 topBar.addWidget("org.kde.plasma.systemtray");
 
 // 2. Bottom Floating Dock: Centered, auto-hides when windows overlap (dodgewindows)

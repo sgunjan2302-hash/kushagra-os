@@ -78,7 +78,9 @@ def stage_workspace_hook(home_dir: str, workspace_style: str) -> None:
 
 def configure_plasmalogin(username: str, autologin: bool) -> None:
     """Remove OOBE autologin and configure normal user autologin or password login."""
-    os.makedirs("/etc/plasmalogin.conf.d", exist_ok=True)
+    conf_dir = "/etc/plasmalogin.conf.d"
+    os.makedirs(conf_dir, exist_ok=True)
+    os.chmod(conf_dir, 0o755)
     if os.path.exists(OOBE_AUTOLOGIN_CONF):
         os.remove(OOBE_AUTOLOGIN_CONF)
 
@@ -88,6 +90,9 @@ def configure_plasmalogin(username: str, autologin: bool) -> None:
         os.chmod(USER_AUTOLOGIN_CONF, 0o644)
     elif os.path.exists(USER_AUTOLOGIN_CONF):
         os.remove(USER_AUTOLOGIN_CONF)
+
+    if shutil.which("restorecon"):
+        subprocess.run(["restorecon", "-RF", conf_dir], check=False)
 
 
 def main() -> int:
@@ -105,7 +110,8 @@ def main() -> int:
         print(f"Error parsing setup payload: {exc}", file=sys.stderr)
         return 1
 
-    fullname = str(payload.get("fullname", "")).strip() or "Kushagra User"
+    raw_fullname = str(payload.get("fullname", "")).replace(":", " ")
+    fullname = " ".join(raw_fullname.split()).strip() or "Kushagra User"
     username = str(payload.get("username", "")).strip()
     password = str(payload.get("password", ""))
     autologin = bool(payload.get("autologin", False))
@@ -153,22 +159,38 @@ def main() -> int:
     if shutil.which("restorecon"):
         subprocess.run(["restorecon", "-RF", home_dir], check=False)
 
-    # 5. Update plasmalogin, mark OOBE complete permanently, and disable OOBE service
+    # 5. Schedule delayed DRM/VT-safe handoff BEFORE wiping OOBE state so failures remain recoverable
+    systemd_run_bin = shutil.which("systemd-run")
+    if not systemd_run_bin:
+        raise RuntimeError("systemd-run not found; cannot schedule OOBE session handoff.")
+
+    handoff_res = subprocess.run(
+        [
+            systemd_run_bin,
+            "--on-active=2",
+            "--unit=kushagra-oobe-handoff",
+            "/bin/bash",
+            "-c",
+            "loginctl terminate-user kushagra-oobe 2>/dev/null || true; sleep 2; systemctl restart plasmalogin.service",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if handoff_res.returncode != 0:
+        detail = (handoff_res.stderr or handoff_res.stdout or f"exit {handoff_res.returncode}").strip()
+        raise RuntimeError(f"Failed to schedule OOBE handoff via systemd-run: {detail}")
+
+    # 6. Update plasmalogin, mark OOBE complete permanently, and disable OOBE service
     configure_plasmalogin(username, autologin)
     with open("/etc/plasma-setup-done", "w", encoding="utf-8") as fp:
         fp.write("done\n")
+    os.chmod("/etc/plasma-setup-done", 0o644)
     with open(OOBE_DONE, "w", encoding="utf-8") as fp:
         fp.write("done\n")
+    os.chmod(OOBE_DONE, 0o644)
     if os.path.exists(OOBE_FLAG):
         os.remove(OOBE_FLAG)
     subprocess.run(["systemctl", "disable", "kushagra-oobe.service"], check=False)
-
-    # 6. Trigger smooth transition into the new Plasma desktop / login manager after exit
-    if shutil.which("systemd-run"):
-        subprocess.run(
-            ["systemd-run", "--on-active=2", "--unit=kushagra-oobe-handoff", "systemctl", "restart", "plasmalogin.service"],
-            check=False,
-        )
 
     return 0
 

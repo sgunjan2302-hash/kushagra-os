@@ -49,6 +49,7 @@ def _parent_disk_from_source(source: str) -> str:
             capture_output=True, text=True, timeout=5, check=False,
         )
         pkname = res.stdout.strip().splitlines()[0].strip() if res.stdout.strip() else ""
+        pkname = os.path.basename(pkname)
         if pkname:
             return f"/dev/{pkname}"
     except Exception:
@@ -123,19 +124,19 @@ def measure_esp_free_mib(part_path: str, mountpoints: list, allow_mount: bool = 
     return None
 
 
-def probe_unallocated_regions(disk_path: str) -> list:
+def _probe_unallocated_regions_status(disk_path: str) -> tuple:
     """Use parted machine-readable output to locate unallocated free regions >= 1 GiB."""
     if not shutil.which("parted"):
-        return []
+        return [], False
     try:
         res = subprocess.run(
             ["parted", "-ms", disk_path, "unit", "B", "print", "free"],
             capture_output=True, text=True, timeout=10, check=False,
         )
         if res.returncode != 0:
-            return []
+            return [], False
     except Exception:
-        return []
+        return [], False
 
     gaps = []
     for raw in res.stdout.splitlines():
@@ -150,6 +151,12 @@ def probe_unallocated_regions(disk_path: str) -> list:
             continue
         if size_b >= MIN_VISUAL_GAP_BYTES:
             gaps.append({"startBytes": start_b, "sizeBytes": size_b})
+    return gaps, True
+
+
+def probe_unallocated_regions(disk_path: str) -> list:
+    """Use parted machine-readable output to locate unallocated free regions >= 1 GiB."""
+    gaps, _ = _probe_unallocated_regions_status(disk_path)
     return gaps
 
 
@@ -161,16 +168,51 @@ def _normalize_mounts(node: dict) -> list:
     return [mp] if mp else []
 
 
+def _collect_all_mounts(node: dict) -> list:
+    """Recursively collect active mountpoints from node and nested children (LUKS/LVM)."""
+    seen = set()
+    mounts = []
+
+    def _walk(item: dict) -> None:
+        for mp in _normalize_mounts(item):
+            if mp and mp not in seen:
+                seen.add(mp)
+                mounts.append(mp)
+        for child in item.get("children") or []:
+            if isinstance(child, dict):
+                _walk(child)
+
+    _walk(node)
+    return mounts
+
+
+def _collect_all_paths(node: dict) -> set:
+    """Recursively collect device paths across node and nested children."""
+    paths = set()
+    if node.get("path"):
+        paths.add(node["path"])
+    raw_kname = node.get("kname") or ""
+    if raw_kname:
+        bn = os.path.basename(raw_kname)
+        if bn:
+            paths.add(f"/dev/{bn}")
+    for child in node.get("children") or []:
+        if isinstance(child, dict):
+            paths.update(_collect_all_paths(child))
+    return paths
+
+
 def _classify_partition(part: dict, disk_path: str, disk_kname: str, is_live_disk: bool, allow_mount: bool) -> dict:
-    path = part.get("path") or f"/dev/{part.get('kname', '')}"
-    kname = part.get("kname") or os.path.basename(path)
+    raw_kname = part.get("kname") or ""
+    kname = os.path.basename(raw_kname) if raw_kname else os.path.basename(part.get("path") or "")
+    path = part.get("path") or (f"/dev/{kname}" if kname else "")
     size_b = int(part.get("size") or 0)
     fstype = (part.get("fstype") or "").strip().lower()
     parttype = (part.get("parttype") or "").strip().lower()
     label = (part.get("label") or "").strip()
     partlabel = (part.get("partlabel") or "").strip()
     combined_label = f"{label} {partlabel}".lower()
-    mounts = _normalize_mounts(part)
+    mounts = _collect_all_mounts(part)
 
     is_esp = (parttype in ESP_PARTTYPES) or (fstype == "vfat" and any("efi" in m.lower() for m in mounts))
     is_windows = (
@@ -200,7 +242,7 @@ def _classify_partition(part: dict, disk_path: str, disk_kname: str, is_live_dis
         badge = "EFI System Partition (Preserved)"
         selectable = False
     elif is_mounted_sys or mounts:
-        badge = "Mounted System Partition"
+        badge = "Mounted System Partition" if is_mounted_sys else "Mounted Volume / Container (Locked)"
         selectable = False
     elif is_too_small:
         badge = "Too Small (< 20 GB)"
@@ -228,6 +270,7 @@ def _classify_partition(part: dict, disk_path: str, disk_kname: str, is_live_dis
         "isEsp": is_esp,
         "isLive": is_live_disk,
         "isTooSmall": is_too_small,
+        "needsInitGpt": False,
         "selectable": selectable,
         "recommended": False,
         "requiresConfirm": True,
@@ -235,6 +278,7 @@ def _classify_partition(part: dict, disk_path: str, disk_kname: str, is_live_dis
         "espLowSpace": esp_low_space,
         "espPath": "",
         "espKname": "",
+        "espDiskKname": "",
         "mounts": mounts,
     }
 
@@ -263,16 +307,19 @@ def scan_storage(allow_privileged: bool = True) -> dict:
     for dev in raw.get("blockdevices", []):
         if dev.get("type") != "disk":
             continue
-        kname = dev.get("kname") or ""
-        path = dev.get("path") or f"/dev/{kname}"
+        raw_kname = dev.get("kname") or ""
+        kname = os.path.basename(raw_kname) if raw_kname else os.path.basename(dev.get("path") or "")
+        path = dev.get("path") or (f"/dev/{kname}" if kname else "")
         size_b = int(dev.get("size") or 0)
-        if kname.startswith(("zram", "loop", "sr", "ram", "fd")) or size_b <= 0:
+        if not kname or kname.startswith(("zram", "loop", "sr", "ram", "fd")) or size_b <= 0:
             continue
 
-        is_live_disk = (path in live_disks) or any(
-            (c.get("path") in live_disks) for c in (dev.get("children") or [])
-        )
-        pttype = (dev.get("pttype") or "").lower()
+        is_live_disk = bool(_collect_all_paths(dev) & live_disks)
+        raw_pttype = (dev.get("pttype") or "").strip().lower()
+        raw_fstype = (dev.get("fstype") or "").strip().lower()
+        is_ro = str(dev.get("ro") or "0").strip().lower() in ("1", "true")
+        disk_mounts = _collect_all_mounts(dev)
+        has_any_children = bool(dev.get("children") or [])
         model = (dev.get("model") or "Local Disk").strip()
         tran = (dev.get("tran") or "internal").lower()
 
@@ -287,37 +334,91 @@ def scan_storage(allow_privileged: bool = True) -> dict:
                 disk_esps.append(seg)
                 all_esps.append(seg)
 
+        has_part_children = len(segments) > 0
+        disk_needs_init_gpt = False
+        pttype = raw_pttype
+
         if not is_live_disk:
-            for idx, gap in enumerate(probe_unallocated_regions(path)):
-                g_size = gap["sizeBytes"]
-                can_pick = g_size >= MIN_TARGET_BYTES
-                segments.append({
-                    "id": f"unalloc:{path}:{gap['startBytes']}",
-                    "kind": "unallocated",
-                    "diskPath": path,
-                    "diskKname": kname,
-                    "partPath": "",
-                    "partKname": "",
-                    "displayName": f"Unallocated Free Space #{idx + 1} on {path}",
-                    "sizeBytes": g_size,
-                    "sizeLabel": _human_size(g_size),
-                    "fstype": "free",
-                    "label": "Unallocated Space",
-                    "badgeText": "Recommended (Clean Dual-Boot)" if can_pick else "Free Space (< 20 GB)",
-                    "isLocked": False,
-                    "isWindows": False,
-                    "isEsp": False,
-                    "isLive": False,
-                    "isTooSmall": not can_pick,
-                    "selectable": can_pick,
-                    "recommended": can_pick,
-                    "requiresConfirm": False,
-                    "espFreeMib": None,
-                    "espLowSpace": False,
-                    "espPath": "",
-                    "espKname": "",
-                    "mounts": [],
-                })
+            gaps = []
+            parted_ok = False
+            if raw_pttype not in ("", "none"):
+                gaps, parted_ok = _probe_unallocated_regions_status(path)
+
+            if (
+                not has_part_children
+                and not has_any_children
+                and not raw_fstype
+                and not is_ro
+                and not disk_mounts
+                and (raw_pttype in ("", "none") or not parted_ok)
+            ):
+                if raw_pttype in ("", "none"):
+                    pttype = "uninitialized"
+                if size_b >= MIN_TARGET_BYTES:
+                    disk_needs_init_gpt = True
+                    usable_bytes = max(0, size_b - 2 * 1024 * 1024)
+                    segments.append({
+                        "id": f"unalloc:{path}:0",
+                        "kind": "unallocated",
+                        "diskPath": path,
+                        "diskKname": kname,
+                        "partPath": "",
+                        "partKname": "",
+                        "displayName": f"Blank Disk (Unallocated Space) on {path}",
+                        "sizeBytes": usable_bytes,
+                        "sizeLabel": _human_size(usable_bytes),
+                        "fstype": "free",
+                        "label": "Unallocated Space",
+                        "badgeText": "Recommended (Blank Disk — Initializes GPT)",
+                        "isLocked": False,
+                        "isWindows": False,
+                        "isEsp": False,
+                        "isLive": False,
+                        "isTooSmall": False,
+                        "needsInitGpt": True,
+                        "selectable": True,
+                        "recommended": True,
+                        "requiresConfirm": False,
+                        "espFreeMib": None,
+                        "espLowSpace": False,
+                        "espPath": "",
+                        "espKname": "",
+                        "espDiskKname": "",
+                        "mounts": [],
+                    })
+            else:
+                for idx, gap in enumerate(gaps):
+                    g_size = gap["sizeBytes"]
+                    can_pick = g_size >= MIN_TARGET_BYTES
+                    segments.append({
+                        "id": f"unalloc:{path}:{gap['startBytes']}",
+                        "kind": "unallocated",
+                        "diskPath": path,
+                        "diskKname": kname,
+                        "partPath": "",
+                        "partKname": "",
+                        "displayName": f"Unallocated Free Space #{idx + 1} on {path}",
+                        "sizeBytes": g_size,
+                        "sizeLabel": _human_size(g_size),
+                        "fstype": "free",
+                        "label": "Unallocated Space",
+                        "badgeText": "Recommended (Clean Dual-Boot)" if can_pick else "Free Space (< 20 GB)",
+                        "isLocked": False,
+                        "isWindows": False,
+                        "isEsp": False,
+                        "isLive": False,
+                        "isTooSmall": not can_pick,
+                        "needsInitGpt": False,
+                        "selectable": can_pick,
+                        "recommended": can_pick,
+                        "requiresConfirm": False,
+                        "espFreeMib": None,
+                        "espLowSpace": False,
+                        "espPath": "",
+                        "espKname": "",
+                        "espDiskKname": "",
+                        "mounts": [],
+                    })
 
         disks.append({
             "path": path,
@@ -325,28 +426,31 @@ def scan_storage(allow_privileged: bool = True) -> dict:
             "model": model,
             "sizeBytes": size_b,
             "sizeLabel": _human_size(size_b),
-            "pttype": pttype or "none",
+            "pttype": pttype or "uninitialized",
             "tran": tran,
             "isLiveMedia": is_live_disk,
             "lockedReason": "Live USB Boot Medium (Locked)" if is_live_disk else "",
+            "needsInitGpt": disk_needs_init_gpt,
             "segments": segments,
             "hasEsp": len(disk_esps) > 0,
         })
 
-    # Attach preserved ESP metadata to every selectable target
+    # Attach preserved ESP metadata: prefer same-disk ESP; fall back to global_esp ONLY for partition mode
     recommended_id = ""
     fallback_id = ""
     global_esp = all_esps[0] if all_esps else None
     for d in disks:
-        disk_esp = next((s for s in d["segments"] if s["isEsp"]), None) or global_esp
+        same_disk_esp = next((s for s in d["segments"] if s["isEsp"]), None)
         for seg in d["segments"]:
             if not seg["selectable"]:
                 continue
-            if disk_esp:
-                seg["espPath"] = disk_esp["partPath"]
-                seg["espKname"] = disk_esp["partKname"]
-                seg["espFreeMib"] = disk_esp["espFreeMib"]
-                seg["espLowSpace"] = disk_esp["espLowSpace"]
+            chosen_esp = same_disk_esp if seg["kind"] == "unallocated" else (same_disk_esp or global_esp)
+            if chosen_esp:
+                seg["espPath"] = chosen_esp["partPath"]
+                seg["espKname"] = chosen_esp["partKname"]
+                seg["espDiskKname"] = chosen_esp["diskKname"]
+                seg["espFreeMib"] = chosen_esp["espFreeMib"]
+                seg["espLowSpace"] = chosen_esp["espLowSpace"]
             elif seg["kind"] == "partition":
                 # Single pre-existing partition mode requires an existing ESP on the system
                 seg["selectable"] = False
@@ -381,7 +485,8 @@ def validate_target_selection(target_id: str) -> tuple:
                 raise ValueError(f"Refused: {target_id} is protected Windows/NTFS/BitLocker storage.")
             if seg.get("isEsp"):
                 raise ValueError(f"Refused: {target_id} is a protected EFI System Partition.")
-            if seg.get("sizeBytes", 0) < MIN_TARGET_BYTES:
+            min_allowed = (MIN_TARGET_BYTES - 2 * 1024 * 1024) if seg.get("needsInitGpt") else MIN_TARGET_BYTES
+            if seg.get("sizeBytes", 0) < min_allowed:
                 raise ValueError(f"Refused: {target_id} is smaller than 20 GiB minimum.")
             if not seg.get("selectable"):
                 raise ValueError(f"Refused: {target_id} is locked or ineligible ({seg.get('badgeText')}).")
@@ -410,6 +515,7 @@ def preview_sample_storage() -> dict:
                 "tran": "nvme",
                 "isLiveMedia": False,
                 "lockedReason": "",
+                "needsInitGpt": False,
                 "hasEsp": True,
                 "segments": [
                     {
@@ -430,6 +536,7 @@ def preview_sample_storage() -> dict:
                         "isEsp": True,
                         "isLive": False,
                         "isTooSmall": False,
+                        "needsInitGpt": False,
                         "selectable": False,
                         "recommended": False,
                         "requiresConfirm": False,
@@ -437,6 +544,7 @@ def preview_sample_storage() -> dict:
                         "espLowSpace": True,
                         "espPath": "/dev/nvme0n1p1",
                         "espKname": "nvme0n1p1",
+                        "espDiskKname": "nvme0n1",
                     },
                     {
                         "id": "part:/dev/nvme0n1p3",
@@ -456,6 +564,7 @@ def preview_sample_storage() -> dict:
                         "isEsp": False,
                         "isLive": False,
                         "isTooSmall": False,
+                        "needsInitGpt": False,
                         "selectable": False,
                         "recommended": False,
                         "requiresConfirm": False,
@@ -463,6 +572,7 @@ def preview_sample_storage() -> dict:
                         "espLowSpace": False,
                         "espPath": "",
                         "espKname": "",
+                        "espDiskKname": "",
                     },
                     {
                         "id": "unalloc:/dev/nvme0n1:204800000000",
@@ -482,6 +592,7 @@ def preview_sample_storage() -> dict:
                         "isEsp": False,
                         "isLive": False,
                         "isTooSmall": False,
+                        "needsInitGpt": False,
                         "selectable": True,
                         "recommended": True,
                         "requiresConfirm": False,
@@ -489,6 +600,7 @@ def preview_sample_storage() -> dict:
                         "espLowSpace": True,
                         "espPath": "/dev/nvme0n1p1",
                         "espKname": "nvme0n1p1",
+                        "espDiskKname": "nvme0n1",
                     },
                     {
                         "id": "part:/dev/nvme0n1p5",
@@ -508,6 +620,7 @@ def preview_sample_storage() -> dict:
                         "isEsp": False,
                         "isLive": False,
                         "isTooSmall": False,
+                        "needsInitGpt": False,
                         "selectable": True,
                         "recommended": False,
                         "requiresConfirm": True,
@@ -515,6 +628,7 @@ def preview_sample_storage() -> dict:
                         "espLowSpace": True,
                         "espPath": "/dev/nvme0n1p1",
                         "espKname": "nvme0n1p1",
+                        "espDiskKname": "nvme0n1",
                     },
                 ],
             },
@@ -528,6 +642,7 @@ def preview_sample_storage() -> dict:
                 "tran": "usb",
                 "isLiveMedia": True,
                 "lockedReason": "Live USB Boot Medium (Locked)",
+                "needsInitGpt": False,
                 "hasEsp": False,
                 "segments": [],
             },

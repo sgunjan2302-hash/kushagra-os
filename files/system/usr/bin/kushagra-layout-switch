@@ -8,7 +8,7 @@ LAYOUT_DIR="/usr/share/kushagra-os/layouts"
 
 # Discover appropriate Qt6 DBus binary
 QDBUS_BIN=""
-for candidate in qdbus6 /usr/lib/qt6/bin/qdbus qdbus-qt6 qdbus; do
+for candidate in qdbus-qt6 /usr/lib64/qt6/bin/qdbus qdbus6 qdbus; do
     if command -v "$candidate" >/dev/null 2>&1; then
         QDBUS_BIN="$candidate"
         break

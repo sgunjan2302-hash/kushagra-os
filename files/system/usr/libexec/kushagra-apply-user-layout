@@ -5,17 +5,47 @@ set -euo pipefail
 STYLE="${1:-classic}"
 AUTOSTART_HOOK="${HOME}/.config/autostart/kushagra-firstboot-layout.desktop"
 
-# Wait up to 25 seconds for PlasmaShell DBus interface to become ready
-for _ in $(seq 1 25); do
-    if qdbus6 org.kde.plasmashell /PlasmaShell >/dev/null 2>&1; then
+# Always clean up any inherited LiveCD desktop shortcut on first login
+rm -f "${HOME}/Desktop/liveinst.desktop" 2>/dev/null || true
+
+# Discover appropriate Qt6 DBus binary
+QDBUS_BIN=""
+for candidate in qdbus-qt6 /usr/lib64/qt6/bin/qdbus qdbus6 qdbus; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        QDBUS_BIN="$candidate"
+        break
+    fi
+done
+
+if [ -z "$QDBUS_BIN" ]; then
+    echo "ERROR: Could not locate a working qdbus/qdbus-qt6 binary." >&2
+    exit 1
+fi
+
+# Wait up to 30 seconds for PlasmaShell DBus interface to become ready
+PLASMA_READY=false
+for _ in $(seq 1 30); do
+    if "$QDBUS_BIN" org.kde.plasmashell /PlasmaShell >/dev/null 2>&1; then
+        PLASMA_READY=true
         break
     fi
     sleep 1
 done
 
-if [ -x /usr/bin/kushagra-layout-switch ]; then
-    /usr/bin/kushagra-layout-switch "${STYLE}" || true
+if [ "$PLASMA_READY" != "true" ]; then
+    echo "ERROR: org.kde.plasmashell /PlasmaShell did not become ready in time; keeping ${AUTOSTART_HOOK} for retry." >&2
+    exit 1
 fi
 
-# Clean up one-shot autostart entry and any inherited LiveCD desktop icon
-rm -f "${AUTOSTART_HOOK}" "${HOME}/Desktop/liveinst.desktop" 2>/dev/null || true
+if [ ! -x /usr/bin/kushagra-layout-switch ]; then
+    echo "ERROR: /usr/bin/kushagra-layout-switch not found or not executable." >&2
+    exit 1
+fi
+
+if ! /usr/bin/kushagra-layout-switch "${STYLE}"; then
+    echo "ERROR: Failed to apply layout '${STYLE}'; keeping ${AUTOSTART_HOOK} for retry." >&2
+    exit 1
+fi
+
+# Remove one-shot autostart entry only after layout succeeds
+rm -f "${AUTOSTART_HOOK}"

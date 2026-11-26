@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QThread, QTimer, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtQml import QQmlApplicationEngine
 
@@ -288,8 +288,7 @@ class OobeBackend(QObject):
         self.applyBusyChanged.emit()
         if ok:
             self.setupCompleted.emit()
-            if self.preview_mode:
-                QGuiApplication.quit()
+            QTimer.singleShot(1200, QGuiApplication.quit)
         else:
             self._setup_error = message
             self.setupErrorChanged.emit()
@@ -297,16 +296,26 @@ class OobeBackend(QObject):
 
 def main() -> int:
     preview_mode = "--preview" in sys.argv
+    try:
+        from PyQt6.QtQuickControls2 import QQuickStyle
+        QQuickStyle.setStyle("Basic")
+    except Exception:
+        pass
+
     app = QGuiApplication(sys.argv)
     app.setApplicationName("Kushagra OS Setup")
     app.setOrganizationName("Kushagra OS")
 
     engine = QQmlApplicationEngine()
     backend = OobeBackend(preview_mode=preview_mode)
-    logo_candidate = Path("/usr/share/kushagra-os/branding/logo-symbol.svg")
-    if not logo_candidate.exists():
-        # Fallback when previewing directly from repository checkout
-        logo_candidate = Path(__file__).resolve().parents[4] / "branding" / "logo-symbol.svg"
+    resolved = Path(__file__).resolve()
+    logo_candidates = [
+        Path("/usr/share/kushagra-os/branding/logo-symbol.svg"),
+        resolved.parents[1] / "branding" / "logo-symbol.svg",
+    ]
+    if len(resolved.parents) > 4:
+        logo_candidates.append(resolved.parents[4] / "branding" / "logo-symbol.svg")
+    logo_candidate = next((p for p in logo_candidates if p.exists()), logo_candidates[1])
 
     engine.rootContext().setContextProperty("oobeBackend", backend)
     engine.rootContext().setContextProperty("kushagraLogoUrl", QUrl.fromLocalFile(str(logo_candidate)))

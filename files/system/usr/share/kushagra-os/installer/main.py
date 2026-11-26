@@ -37,6 +37,13 @@ class ScanWorker(QThread):
                 if res.returncode == 0 and res.stdout.strip():
                     self.scanFinished.emit(json.loads(res.stdout))
                     return
+                err_detail = (res.stderr or res.stdout or f"exit code {res.returncode}").strip()
+                data = storage_probe.scan_storage(allow_privileged=False)
+                prev_err = data.get("error", "").strip()
+                msg = f"Privileged storage scan failed (code {res.returncode}): {err_detail}"
+                data["error"] = f"{msg} | {prev_err}" if prev_err else msg
+                self.scanFinished.emit(data)
+                return
             except Exception as exc:
                 data = storage_probe.scan_storage(allow_privileged=False)
                 data["error"] = f"Privileged probe fallback ({exc})"
@@ -292,6 +299,12 @@ def main() -> int:
     app = QGuiApplication(sys.argv)
     app.setApplicationName("Kushagra OS Installer")
     app.setOrganizationName("Kushagra OS")
+
+    try:
+        from PyQt6.QtQuickControls2 import QQuickStyle
+        QQuickStyle.setStyle("Basic")
+    except Exception:
+        pass
 
     backend = InstallerBackend(preview_mode=preview_mode)
     engine = QQmlApplicationEngine()

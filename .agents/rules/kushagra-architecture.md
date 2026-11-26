@@ -1,0 +1,13 @@
+# Kushagra OS Architecture & Release Invariants (`v0.2.1+`)
+
+1. **सत्य और रनटाइम सत्यापन (Truthfulness & Runtime Verification):** बिना QEMU/KVM या असल हार्डवेयर पर बूट करके देखे किसी भी बदलाव को "काम कर रहा है" न कहें; अनटेस्टेड चीज़ों को `[UNVERIFIED - NEEDS VM TEST]` टैग करें।
+2. **CI रिलीज़ क्रम (Strict Release Ordering):** पहले हमेशा `main` ब्रांच कमिट व पुश करें ताकि कंटेनर और सटीक `image_digest` वाला ISO बन जाए; दोनों के `[PASS]` होने के बाद ही `vX.Y.Z` टैग पुश करें।
+3. **Immutable `bootc` व `/var` अनुशासन:** कंटेनर बिल्ड में `/var` के अंदर रनटाइम स्टेट फ़ाइलें न बनाएं (केवल `tmpfiles.d` व `/etc` फ़्लैग्स का सही उपयोग करें); ध्यान रहे `tmpfiles.d/kushagra-oobe.conf` रीबूट पर `kushagra-oobe-pending` दोबारा न बनाए।
+4. **डुअल-बूट पार्टिशन सुरक्षा (Dual-Boot Safety):** हमेशा `clearpart --none` रखें, बूट हुई USB, Windows `NTFS`/`BitLocker`, Recovery व मौजूदा `EFI` (`--noformat`) लॉक रखें, और `< 35 MiB` ESP पर चेतावनी दें।
+5. **Plasma 6.6+ इनपुट फ़िक्स:** `Plasma Keyboard` को डिफ़ॉल्ट बंद रखकर वर्चुअल कीबोर्ड को `Fcitx5` / `iBus Wayland` पर लॉक रखें (Electron, Dolphin rename व Firefox बग्स से बचाव हेतु)।
+6. **KWin शेडर नियम:** कोई भी KWin इफ़ेक्ट COPR से लेयर करने के बजाय BlueBuild में बेस KWin हेडर्स पर कंपाइल करें, `Translucency` बंद रखें, और `low-ram-mode` में ऑटो-ऑफ़ रखें।
+7. **प्राइवेसी-प्रथम `K-AI` व Polkit:** कभी बैकग्राउंड स्क्रीन रिकॉर्डिंग न जोड़ें; हर प्रिविलिज्ड एक्शन के लिए स्पष्ट Polkit अनुमति व ऑडिट लॉग रखें।
+8. **हार्डवेयर टियर अनुशासन:** लोकल LLM के लिए Vulkan `llama.cpp` प्राथमिकता रखें; कम रैम वाले सिस्टम पर `clamd` ऑटो-स्टार्ट न करें।
+9. **सुरक्षा बिना लॉकआउट:** Quad9 के साथ `DNSOverTLS=opportunistic` रखें, और HID वाइटलिस्ट बनाए बिना `usbguard.service` ऑटो-एनेबल न करें।
+10. **निषिद्ध सूची (Prohibited Items):** अल्फ़ा `Darling` (`.dmg`), प्रॉपराइटरी ब्लॉब्स, या अस्थायी स्क्रैच फ़ाइलें Git कमिट में न डालें।
+11. **समानांतर मल्टी-एजेंट निष्पादन (Parallel Multi-Agent Execution):** एक से अधिक मॉड्यूल या स्वतंत्र फ़ाइलों पर काम हमेशा समानांतर सब-एजेंट्स (`disjoint file ownership` के साथ) को बाँटकर तेज़ी से करें, और अंत में साझा फ़ाइलों का एकीकरण व स्वतंत्र Auditor जांच (`build-verify-os`) अवश्य कराएं।

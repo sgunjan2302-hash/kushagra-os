@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,12 +22,14 @@ ANACONDA_LOGS = [
     "/tmp/storage.log",
 ]
 
+SOFTWARE_PROGRESS_RE = re.compile(r"installing software\s+(\d+)%", re.IGNORECASE)
+
 MILESTONE_RULES = [
-    (12, "Initializing storage & hardware layout...", ("probing storage", "configuring storage", "blivet", "storage configuration")),
-    (25, "Creating Btrfs subvolumes & mounting /boot/efi...", ("executing storage tasks", "creating btrfs", "creating ext4", "formatting")),
-    (42, "Deploying Kushagra OS immutable system image...", ("setting up installation source", "installing software", "deploying", "copying live", "rsync")),
-    (84, "Generating initramfs & UEFI GRUB2 bootloader...", ("installing boot loader", "bootloader", "grub2", "dracut", "initramfs")),
-    (93, "Configuring Stage 2 OOBE handoff & security seals...", ("post-installation", "running post-installation", "kushagra-oobe-pending")),
+    (12, "Initializing storage & hardware layout...", ("probing storage", "configuring storage", "initializing storage")),
+    (25, "Creating Btrfs subvolumes & formatting target...", ("executing storage tasks", "creating btrfs", "creating ext4", "creating efi", "formatting")),
+    (35, "Deploying Kushagra OS immutable system image...", ("setting up the installation source", "setting up installation source", "installing software", "deploying live", "copying live")),
+    (89, "Staging kernel, initramfs & UEFI GRUB2 bootloader...", ("running post-installation", "performing post-installation", "installing boot loader")),
+    (95, "Configuring Stage 2 OOBE handoff & security seals...", ("kushagra_post: arming stage 2 oobe", "kushagra-oobe-pending")),
 ]
 
 
@@ -54,6 +57,22 @@ def run_install(payload: dict) -> int:
     if target.get("kind") == "partition" and target.get("partPath"):
         subprocess.run(["umount", target["partPath"]], capture_output=True, check=False)
 
+    # Initialize GPT cleanly on uninitialized/blank disks before invoking Anaconda
+    has_existing_parts = any(s.get("kind") == "partition" for s in disk.get("segments", []))
+    if (disk.get("pttype") in ("", "none", "uninitialized") or target.get("needsInitGpt")) and not has_existing_parts:
+        emit_progress(4, f"Initializing GPT partition table on {disk['path']}...", [
+            f"Initializing GPT label on blank disk {disk['path']}",
+        ])
+        gpt_res = subprocess.run(
+            ["parted", "-s", disk["path"], "mklabel", "gpt"],
+            capture_output=True, text=True, check=False,
+        )
+        if gpt_res.returncode != 0:
+            err = (gpt_res.stderr or gpt_res.stdout or "parted mklabel gpt failed").strip()
+            print(f"Failed to initialize GPT on {disk['path']}: {err}", file=sys.stderr)
+            return 1
+        subprocess.run(["udevadm", "settle"], capture_output=True, check=False)
+
     ks_text = ks_builder.build_kickstart(target)
     with open(KS_PATH, "w", encoding="utf-8") as fp:
         fp.write(ks_text)
@@ -68,8 +87,16 @@ def run_install(payload: dict) -> int:
     if shutil.which("anaconda-cleanup"):
         subprocess.run(["anaconda-cleanup"], capture_output=True, check=False)
 
-    # Mirror liveinst environment metadata & temporary permissive SELinux toggle cleanly
+    # Preserve session env vars across pkexec & temporary permissive SELinux toggle cleanly
     env = os.environ.copy()
+    pkexec_uid = env.get("PKEXEC_UID", "").strip()
+    if pkexec_uid.isdigit():
+        runtime_dir = f"/run/user/{pkexec_uid}"
+        if not env.get("XDG_RUNTIME_DIR"):
+            env["XDG_RUNTIME_DIR"] = runtime_dir
+        bus_sock = os.path.join(env["XDG_RUNTIME_DIR"], "bus")
+        if not env.get("DBUS_SESSION_BUS_ADDRESS") and os.path.exists(bus_sock):
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_sock}"
     env.setdefault("ANACONDA_PRODUCTNAME", "Kushagra OS")
     env.setdefault("ANACONDA_PRODUCTVERSION", "44")
     env.setdefault("ANACONDA_ISFINAL", "true")
@@ -89,7 +116,6 @@ def run_install(payload: dict) -> int:
 
     cmd = [
         "/usr/bin/anaconda",
-        "--liveinst",
         "--cmdline",
         "--profile",
         "kushagra-os",
@@ -114,6 +140,7 @@ def run_install(payload: dict) -> int:
             percent = 10
             stage = "Preparing Anaconda installer modules..."
             last_heartbeat = time.monotonic()
+            last_creep = last_heartbeat
 
             while True:
                 new_lines = []
@@ -148,17 +175,26 @@ def run_install(payload: dict) -> int:
 
                 for line in new_lines:
                     low = line.lower()
+                    sw_match = SOFTWARE_PROGRESS_RE.search(low)
+                    if sw_match:
+                        sw_pct = max(0, min(100, int(sw_match.group(1))))
+                        mapped = 35 + int(round((sw_pct / 100.0) * (88 - 35)))
+                        if mapped > percent:
+                            percent = mapped
+                        if percent <= 88:
+                            stage = f"Deploying Kushagra OS immutable system image ({sw_pct}%)..."
+                        continue
+
                     for target_pct, target_stage, keywords in MILESTONE_RULES:
                         if target_pct > percent and any(k in low for k in keywords):
                             percent = target_pct
                             stage = target_stage
-                    if 42 <= percent < 82 and ("install" in low or "copy" in low or "progress" in low):
-                        percent = min(82, percent + 1)
 
                 now = time.monotonic()
                 if new_lines or (now - last_heartbeat >= 2.0):
-                    if not new_lines and 42 <= percent < 80:
+                    if not new_lines and 35 <= percent < 84 and (now - last_creep >= 8.0):
                         percent += 1
+                        last_creep = now
                     emit_progress(percent, stage, new_lines[-40:])
                     log_fp.flush()
                     last_heartbeat = now

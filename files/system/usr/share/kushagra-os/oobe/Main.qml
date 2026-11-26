@@ -28,6 +28,114 @@ Window {
     palette.buttonText: "#FFFFFF"
     palette.button: "#1E293B"
 
+    component GlassCheckBox: CheckBox {
+        id: cbControl
+        implicitHeight: 32
+        spacing: 10
+        hoverEnabled: true
+        indicator: Rectangle {
+            implicitWidth: 20
+            implicitHeight: 20
+            x: cbControl.leftPadding
+            y: parent.height / 2 - height / 2
+            radius: 5
+            color: cbControl.checked ? "#FF9933" : (cbControl.hovered ? "#28FFFFFF" : "#1AFFFFFF")
+            border.color: cbControl.checked ? "#FF9933" : (cbControl.activeFocus ? "#FF9933" : "#66FFFFFF")
+            border.width: 1.5
+            Text {
+                anchors.centerIn: parent
+                visible: cbControl.checked
+                text: "✓"
+                color: "#060913"
+                font.pixelSize: 13
+                font.weight: Font.Bold
+            }
+        }
+        contentItem: Text {
+            text: cbControl.text
+            font.pixelSize: 13
+            color: cbControl.enabled ? "#FFFFFF" : "#64748B"
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: cbControl.indicator.width + cbControl.spacing
+        }
+    }
+
+    component GlassSwitch: Switch {
+        id: swControl
+        implicitHeight: 32
+        spacing: 10
+        hoverEnabled: true
+        indicator: Rectangle {
+            implicitWidth: 44
+            implicitHeight: 24
+            x: swControl.leftPadding
+            y: parent.height / 2 - height / 2
+            radius: 12
+            color: swControl.checked ? "#FF9933" : (swControl.hovered ? "#2EFFFFFF" : "#1E293B")
+            border.color: swControl.checked ? "#FF9933" : (swControl.activeFocus ? "#FF9933" : "#64748B")
+            border.width: 1
+
+            Rectangle {
+                x: swControl.checked ? parent.width - width - 3 : 3
+                anchors.verticalCenter: parent.verticalCenter
+                width: 18
+                height: 18
+                radius: 9
+                color: swControl.checked ? "#060913" : "#E2E8F0"
+                Behavior on x { NumberAnimation { duration: 140 } }
+            }
+        }
+        contentItem: Text {
+            text: swControl.text
+            font.pixelSize: 13
+            color: swControl.enabled ? "#FFFFFF" : "#64748B"
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: swControl.indicator.width + swControl.spacing
+        }
+    }
+
+    component GlassButton: Button {
+        id: btnControl
+        implicitHeight: 38
+        leftPadding: 18
+        rightPadding: 18
+        topPadding: 8
+        bottomPadding: 8
+        hoverEnabled: true
+        background: Rectangle {
+            implicitWidth: 88
+            implicitHeight: 38
+            radius: 10
+            color: {
+                if (!btnControl.enabled) {
+                    return btnControl.highlighted ? "#33FF9933" : "#10FFFFFF"
+                }
+                if (btnControl.highlighted) {
+                    return btnControl.down ? "#D97706" : (btnControl.hovered ? "#FFA94D" : "#FF9933")
+                }
+                return btnControl.down ? "#33FFFFFF" : (btnControl.hovered ? "#24FFFFFF" : "#16FFFFFF")
+            }
+            border.color: {
+                if (!btnControl.enabled) return "#22FFFFFF"
+                if (btnControl.highlighted) return btnControl.activeFocus ? "#FFFFFF" : "#FF9933"
+                return btnControl.activeFocus ? "#FF9933" : "#38FFFFFF"
+            }
+            border.width: 1
+        }
+        contentItem: Text {
+            text: btnControl.text
+            font.pixelSize: 13
+            font.weight: btnControl.highlighted ? Font.Bold : Font.Medium
+            color: {
+                if (!btnControl.enabled) return "#94A3B8"
+                return btnControl.highlighted ? "#060913" : "#FFFFFF"
+            }
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+        }
+    }
+
     Connections {
         target: oobeBackend
         function onSetupCompleted() {
@@ -254,7 +362,7 @@ Window {
                             }
                         }
                         Item { Layout.fillWidth: true }
-                        Button {
+                        GlassButton {
                             text: oobeBackend.wifiBusy ? (isHindi ? "स्कैन..." : "Scanning...") : (isHindi ? "रीफ्रेश" : "Refresh")
                             enabled: !oobeBackend.wifiBusy
                             onClicked: oobeBackend.scanWifi()
@@ -345,7 +453,7 @@ Window {
                                 border.width: 1
                             }
                         }
-                        Button {
+                        GlassButton {
                             text: isHindi ? "कनेक्ट करें" : "Connect"
                             enabled: !oobeBackend.wifiBusy
                             onClicked: oobeBackend.connectWifi(root.selectedSsid, wifiPasswordField.text)
@@ -516,8 +624,8 @@ Window {
                     }
                     Text {
                         text: isHindi
-                              ? "यह सिस्टम एडमिनिस्ट्रेटर (`wheel`) अकाउंट होगा। सेटअप के बाद कोई असुरक्षित डिफ़ॉल्ट पासवर्ड नहीं बचेगा।"
-                              : "Creates your primary administrator (`wheel`) account and seals first-boot setup."
+                              ? "यह सिस्टम एडमिनिस्ट्रेटर (wheel) अकाउंट होगा। सेटअप के बाद कोई असुरक्षित डिफ़ॉल्ट पासवर्ड नहीं बचेगा।"
+                              : "Creates your primary administrator (wheel) account and seals first-boot setup."
                         color: "#CBD5E1"; font.pixelSize: 13
                     }
 
@@ -607,13 +715,13 @@ Window {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 24
-                        CheckBox {
+                        GlassCheckBox {
                             checked: root.showPassword
                             text: isHindi ? "पासवर्ड दिखाएं" : "Show password"
                             onToggled: root.showPassword = checked
                         }
                         Item { Layout.fillWidth: true }
-                        Switch {
+                        GlassSwitch {
                             id: autoLoginSwitch
                             checked: true
                             text: isHindi ? "बूट पर ऑटो-लॉगिन चालू रखें" : "Auto-login on boot"
@@ -662,7 +770,7 @@ Window {
                 Layout.fillWidth: true
                 spacing: 12
 
-                Button {
+                GlassButton {
                     visible: root.currentStep > 0 && !oobeBackend.applyBusy && !root.setupDoneBanner
                     text: isHindi ? "← पीछे" : "← Back"
                     onClicked: root.currentStep -= 1
@@ -670,13 +778,13 @@ Window {
 
                 Item { Layout.fillWidth: true }
 
-                Button {
+                GlassButton {
                     visible: root.currentStep === 1 && !oobeBackend.applyBusy
                     text: isHindi ? "अभी छोड़ें (Skip)" : "Skip for now"
                     onClicked: root.currentStep = 2
                 }
 
-                Button {
+                GlassButton {
                     visible: root.currentStep < 3
                     text: isHindi ? "आगे बढ़ें →" : "Continue →"
                     highlighted: true
@@ -688,7 +796,7 @@ Window {
                     }
                 }
 
-                Button {
+                GlassButton {
                     visible: root.currentStep === 3
                     highlighted: true
                     enabled: !oobeBackend.applyBusy && !root.setupDoneBanner && passwordField.text.length >= 4 && passwordField.text === confirmField.text && usernameField.text.trim().length > 0

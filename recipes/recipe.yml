@@ -38,7 +38,7 @@ modules:
       NAME: "Kushagra OS"
       ID: "kushagra-os"
       ID_LIKE: "fedora"
-      PRETTY_NAME: "Kushagra OS (v0.1 Prototype)"
+      PRETTY_NAME: "Kushagra OS 44 (v0.2.1)"
       DEFAULT_HOSTNAME: "kushagra-pc"
       HOME_URL: "https://github.com/kushagra-os"
       SUPPORT_URL: "https://github.com/kushagra-os/kushagra-os/issues"

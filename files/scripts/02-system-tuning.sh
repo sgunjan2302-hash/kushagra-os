@@ -30,7 +30,7 @@ if compgen -G "/etc/sysctl.d/*.conf" > /dev/null; then
     chmod 0644 /etc/sysctl.d/*.conf
 fi
 
-for cfg in /etc/systemd/zram-generator.conf /etc/environment /etc/polkit-1/rules.d/50-kushagra-oobe.rules /etc/polkit-1/rules.d/50-kushagra-installer.rules /etc/anaconda/profile.d/kushagra-os.conf /etc/xdg/mimeapps.list; do
+for cfg in /etc/systemd/zram-generator.conf /etc/environment /etc/polkit-1/rules.d/50-kushagra-oobe.rules /etc/polkit-1/rules.d/50-kushagra-installer.rules /etc/anaconda/profile.d/kushagra-os.conf /etc/xdg/mimeapps.list /etc/systemd/system/system-flatpak-setup.service.d/10-skip-livecd.conf /etc/systemd/system/system-flatpak-setup.timer.d/10-skip-livecd.conf /etc/systemd/system/bootloader-update.service.d/10-kushagra-live-guard.conf; do
     if [ -f "$cfg" ]; then
         chmod 0644 "$cfg"
     fi
@@ -85,9 +85,8 @@ systemctl enable livesys.service livesys-late.service || true
 
 # 5. Prepare Kushagra First-Boot OOBE Wizard & Inhibit Upstream Plasma Setup
 echo "Preparing Kushagra OS First-Boot OOBE Wizard..."
-mkdir -p /var/lib /etc/plasmalogin.conf.d
-touch /var/lib/kushagra-oobe-pending
-chmod 0644 /var/lib/kushagra-oobe-pending
+# Do not bake runtime /var/lib/kushagra-oobe-pending state into the container image; K-Installer %post creates it on install
+mkdir -p /etc/plasmalogin.conf.d
 
 # Inhibit Fedora upstream plasma-setup.service so kushagra-oobe runs exclusively
 touch /etc/plasma-setup-done
