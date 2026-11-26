@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Name=Install Kushagra OS
+GenericName=Kushagra OS OEM Installer
+Comment=Install Kushagra OS safely onto an internal drive or partition
+Exec=/usr/bin/kushagra-installer
+Icon=/usr/share/kushagra-os/branding/logo-symbol.svg
+Terminal=false
+Type=Application
+Categories=System;
+StartupNotify=true

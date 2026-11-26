@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Kushagra Windows App Runner
+GenericName=Windows EXE/MSI Compatibility Launcher
+Comment=Launch Windows .exe and .msi installers via umu-launcher / Bottles
+Exec=/usr/bin/kushagra-winrun %f
+Icon=application-x-ms-dos-executable
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+InitialPreference=10
+MimeType=application/vnd.microsoft.portable-executable;application/x-ms-dos-executable;application/x-msdownload;application/x-dosexec;application/x-ms-ne-executable;application/x-msi;

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Launch K-Installer fullscreen kiosk ONLY on LiveCD sessions (rd.live.image + liveuser)
+if ! grep -qw "rd.live.image" /proc/cmdline; then
+    exit 0
+fi
+
+if [ "$(id -un)" != "liveuser" ]; then
+    exit 0
+fi
+
+# Show automatically once per live session so "Try Live Desktop" stays cleanly on desktop
+LAUNCH_FLAG="${XDG_RUNTIME_DIR:-/tmp}/kushagra-installer-autostarted"
+if [ -e "${LAUNCH_FLAG}" ]; then
+    exit 0
+fi
+touch "${LAUNCH_FLAG}"
+
+exec /usr/bin/kushagra-installer

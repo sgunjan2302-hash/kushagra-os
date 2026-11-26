@@ -38,11 +38,47 @@ low-ram-mode ACTION="status":
             ;;
     esac
 
-# Initialize Waydroid container network routing and graphics configuration
-setup-waydroid:
+# Initialize Waydroid container network routing, multi-window mode, and CPU-matched ARM translation
+setup-waydroid ACTION="setup":
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "=== Kushagra OS Waydroid Setup ==="
+    echo "=== Kushagra OS Smart Waydroid Setup ==="
+
+    if grep -qw "rd.live.image" /proc/cmdline; then
+        echo "[BLOCKED] Waydroid cannot run inside a LiveCD USB session."
+        echo "Install Kushagra OS to disk first, then run 'ujust setup-waydroid'."
+        exit 1
+    fi
+
+    # Detect x86_64 CPU vendor to select optimal ARM binary translation library
+    CPU_VENDOR="$(grep -m1 '^vendor_id' /proc/cpuinfo | awk -F: '{print $2}' | xargs || true)"
+    case "${CPU_VENDOR}" in
+        GenuineIntel)
+            ARM_LAYER="libhoudini"
+            CPU_LABEL="Intel (${CPU_VENDOR})"
+            ;;
+        AuthenticAMD)
+            ARM_LAYER="libndk"
+            CPU_LABEL="AMD (${CPU_VENDOR})"
+            ;;
+        *)
+            ARM_LAYER="libndk"
+            CPU_LABEL="Unknown (${CPU_VENDOR:-generic}) — defaulting to libndk"
+            ;;
+    esac
+    echo "Detected CPU Vendor: ${CPU_LABEL} -> Recommended ARM layer: ${ARM_LAYER}"
+
+    if [ "{{ACTION}}" = "multi-window" ]; then
+        echo "Enabling Waydroid multi-window desktop integration..."
+        sudo waydroid prop set persist.waydroid.multi_windows true || {
+            echo "Start your Waydroid session first ('waydroid session start &'), then re-run 'ujust setup-waydroid multi-window'."
+            exit 1
+        }
+        sudo systemctl restart waydroid-container.service || true
+        echo "Multi-window mode enabled (apps open as native Plasma windows)."
+        exit 0
+    fi
+
     echo "Configuring firewalld trusted zone for Waydroid..."
     sudo firewall-cmd --zone=trusted --add-interface=waydroid0 --permanent 2>/dev/null || true
     sudo firewall-cmd --zone=trusted --add-port=67/udp --permanent 2>/dev/null || true
@@ -63,6 +99,34 @@ setup-waydroid:
     echo "Initializing Waydroid system container..."
     sudo waydroid init || echo "Waydroid already initialized or requires network access."
     sudo systemctl restart waydroid-container.service || true
+
+    # Apply multi-window property when container session property daemon responds
+    if waydroid prop set persist.waydroid.multi_windows true 2>/dev/null || sudo waydroid prop set persist.waydroid.multi_windows true 2>/dev/null; then
+        echo "Enabled persist.waydroid.multi_windows = true for native desktop app windows."
+    else
+        echo "Note: After launching Waydroid once, run 'ujust setup-waydroid multi-window' to enable floating app windows."
+    fi
+
+    echo ""
+    echo "=== CPU-Matched ARM Translation Helper (${ARM_LAYER}) ==="
+    if command -v git >/dev/null 2>&1; then
+        read -r -p "Download & run casualsnek/waydroid_script to install ${ARM_LAYER}? [y/N]: " REPLY_ARM
+        if [[ "${REPLY_ARM:-N}" =~ ^[Yy]$ ]]; then
+            WS_DIR="${HOME}/.cache/kushagra-waydroid/waydroid_script"
+            rm -rf "${WS_DIR}"
+            mkdir -p "$(dirname "${WS_DIR}")"
+            git clone --depth 1 https://github.com/casualsnek/waydroid_script "${WS_DIR}"
+            python3 -m venv "${WS_DIR}/.venv"
+            "${WS_DIR}/.venv/bin/pip" install -q -r "${WS_DIR}/requirements.txt"
+            sudo "${WS_DIR}/.venv/bin/python" "${WS_DIR}/main.py" install "${ARM_LAYER}"
+            sudo systemctl restart waydroid-container.service || true
+            echo "Installed ${ARM_LAYER} ARM translation cleanly."
+        else
+            echo "Skipped ARM translation download. To install ${ARM_LAYER} manually later:"
+            echo "  git clone --depth 1 https://github.com/casualsnek/waydroid_script ~/.cache/kushagra-waydroid/waydroid_script"
+            echo "  sudo python3 ~/.cache/kushagra-waydroid/waydroid_script/main.py install ${ARM_LAYER}"
+        fi
+    fi
 
     echo "--------------------------------------------------------------------------------"
     echo "CRITICAL COMPATIBILITY NOTICE:"
@@ -119,7 +183,10 @@ health-check:
 # Launch Graphical Installer for Kushagra OS
 install-to-disk:
     #!/usr/bin/env bash
-    if command -v liveinst >/dev/null 2>&1; then
+    if command -v kushagra-installer >/dev/null 2>&1; then
+        echo "Launching Kushagra OS OEM Installer (K-Installer)..."
+        kushagra-installer &
+    elif command -v liveinst >/dev/null 2>&1; then
         echo "Launching Anaconda Live graphical installer..."
         sudo liveinst
     elif command -v calamares >/dev/null 2>&1; then

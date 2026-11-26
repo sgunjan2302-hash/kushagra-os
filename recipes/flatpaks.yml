@@ -5,6 +5,9 @@ configurations:
     repo-url: https://dl.flathub.org/repo/flathub.flatpakrepo
     repo-name: flathub
     install:
+      # --- App Store & Software Discovery (Fast GTK4/Adwaita Flathub Client) ---
+      - io.github.kolunmi.Bazaar
+
       # --- Office Productivity (Clean Wayland + Indic IME compatibility) ---
       - org.onlyoffice.desktopeditors
 

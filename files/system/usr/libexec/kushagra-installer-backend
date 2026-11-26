@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""Privileged K-Installer storage scanner and Anaconda Kickstart runner (via pkexec)."""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/share/kushagra-os/installer")
+import ks_builder
+import storage_probe
+
+RUN_DIR = "/run/kushagra-installer"
+KS_PATH = os.path.join(RUN_DIR, "install.ks")
+LOG_PATH = os.path.join(RUN_DIR, "install.log")
+ANACONDA_LOGS = [
+    "/tmp/anaconda.log",
+    "/tmp/packaging.log",
+    "/tmp/storage.log",
+]
+
+MILESTONE_RULES = [
+    (12, "Initializing storage & hardware layout...", ("probing storage", "configuring storage", "blivet", "storage configuration")),
+    (25, "Creating Btrfs subvolumes & mounting /boot/efi...", ("executing storage tasks", "creating btrfs", "creating ext4", "formatting")),
+    (42, "Deploying Kushagra OS immutable system image...", ("setting up installation source", "installing software", "deploying", "copying live", "rsync")),
+    (84, "Generating initramfs & UEFI GRUB2 bootloader...", ("installing boot loader", "bootloader", "grub2", "dracut", "initramfs")),
+    (93, "Configuring Stage 2 OOBE handoff & security seals...", ("post-installation", "running post-installation", "kushagra-oobe-pending")),
+]
+
+
+def emit_progress(percent: int, stage: str, log_lines=None) -> None:
+    payload = {"percent": percent, "stage": stage, "logs": log_lines or []}
+    print("PROGRESS " + json.dumps(payload), flush=True)
+
+
+def run_install(payload: dict) -> int:
+    target_id = str(payload.get("targetId", "")).strip()
+    confirmed = bool(payload.get("confirmed", False))
+    if not confirmed:
+        print("Installation confirmation missing.", file=sys.stderr)
+        return 1
+
+    try:
+        target, disk, _ = storage_probe.validate_target_selection(target_id)
+    except Exception as exc:
+        print(f"Target validation failed: {exc}", file=sys.stderr)
+        return 1
+
+    os.makedirs(RUN_DIR, exist_ok=True)
+
+    # Unmount only the single user-selected target partition if somehow automounted
+    if target.get("kind") == "partition" and target.get("partPath"):
+        subprocess.run(["umount", target["partPath"]], capture_output=True, check=False)
+
+    ks_text = ks_builder.build_kickstart(target)
+    with open(KS_PATH, "w", encoding="utf-8") as fp:
+        fp.write(ks_text)
+    os.chmod(KS_PATH, 0o600)
+
+    emit_progress(5, f"Validated target {target['displayName']} (EFI {target.get('espPath') or 'new'})", [
+        f"Target: {target['displayName']} [{target['kind']}]",
+        f"Preserved Disk Neighbors: {disk['path']} ({disk['model']})",
+    ])
+
+    # Clear stale non-running cleanup state if present without interrupting active installer
+    if shutil.which("anaconda-cleanup"):
+        subprocess.run(["anaconda-cleanup"], capture_output=True, check=False)
+
+    # Mirror liveinst environment metadata & temporary permissive SELinux toggle cleanly
+    env = os.environ.copy()
+    env.setdefault("ANACONDA_PRODUCTNAME", "Kushagra OS")
+    env.setdefault("ANACONDA_PRODUCTVERSION", "44")
+    env.setdefault("ANACONDA_ISFINAL", "true")
+    env["PATH"] = f"/sbin:/usr/sbin:{env.get('PATH', '')}"
+
+    prev_selinux = ""
+    if os.path.exists("/usr/sbin/getenforce") and os.path.exists("/usr/sbin/setenforce"):
+        res_se = subprocess.run(["/usr/sbin/getenforce"], capture_output=True, text=True, check=False)
+        prev_selinux = res_se.stdout.strip()
+        if prev_selinux == "Enforcing":
+            subprocess.run(["/usr/sbin/setenforce", "0"], capture_output=True, check=False)
+
+    # Track current log byte offsets so we only stream new lines generated during this run
+    offsets = {}
+    for lp in ANACONDA_LOGS:
+        offsets[lp] = os.path.getsize(lp) if os.path.exists(lp) else 0
+
+    cmd = [
+        "/usr/bin/anaconda",
+        "--liveinst",
+        "--cmdline",
+        "--profile",
+        "kushagra-os",
+        "--kickstart",
+        KS_PATH,
+    ]
+    emit_progress(8, "Starting Anaconda non-interactive installation backend...", [f"Command: {' '.join(cmd)}"])
+
+    ret = 1
+    try:
+        with open(LOG_PATH, "w", encoding="utf-8") as log_fp:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+                bufsize=1,
+            )
+            os.set_blocking(proc.stdout.fileno(), False)
+
+            percent = 10
+            stage = "Preparing Anaconda installer modules..."
+            last_heartbeat = time.monotonic()
+
+            while True:
+                new_lines = []
+                try:
+                    chunk = proc.stdout.read()
+                    if chunk:
+                        for line in chunk.splitlines():
+                            clean = line.strip()
+                            if clean:
+                                log_fp.write(clean + "\n")
+                                new_lines.append(clean)
+                except BlockingIOError:
+                    pass
+
+                for lp in ANACONDA_LOGS:
+                    if not os.path.exists(lp):
+                        continue
+                    try:
+                        sz = os.path.getsize(lp)
+                        prev = offsets.get(lp, 0)
+                        if sz > prev:
+                            with open(lp, "r", encoding="utf-8", errors="replace") as afp:
+                                afp.seek(prev)
+                                for line in afp.read().splitlines():
+                                    clean = line.strip()
+                                    if clean:
+                                        log_fp.write(f"[{os.path.basename(lp)}] {clean}\n")
+                                        new_lines.append(clean)
+                            offsets[lp] = sz
+                    except Exception:
+                        pass
+
+                for line in new_lines:
+                    low = line.lower()
+                    for target_pct, target_stage, keywords in MILESTONE_RULES:
+                        if target_pct > percent and any(k in low for k in keywords):
+                            percent = target_pct
+                            stage = target_stage
+                    if 42 <= percent < 82 and ("install" in low or "copy" in low or "progress" in low):
+                        percent = min(82, percent + 1)
+
+                now = time.monotonic()
+                if new_lines or (now - last_heartbeat >= 2.0):
+                    if not new_lines and 42 <= percent < 80:
+                        percent += 1
+                    emit_progress(percent, stage, new_lines[-40:])
+                    log_fp.flush()
+                    last_heartbeat = now
+
+                ret = proc.poll()
+                if ret is not None:
+                    try:
+                        rem = proc.stdout.read()
+                        if rem:
+                            trail = [ln.strip() for ln in rem.splitlines() if ln.strip()]
+                            for ln in trail:
+                                log_fp.write(ln + "\n")
+                            if trail:
+                                emit_progress(percent, stage, trail[-40:])
+                    except Exception:
+                        pass
+                    break
+
+                time.sleep(0.5)
+    finally:
+        if prev_selinux == "Enforcing" and os.path.exists("/usr/sbin/setenforce"):
+            subprocess.run(["/usr/sbin/setenforce", "1"], capture_output=True, check=False)
+
+    if ret != 0:
+        emit_progress(percent, f"Anaconda exited with error code {ret}", [f"FATAL: anaconda failed with code {ret}. Inspect /run/kushagra-installer/install.log and /tmp/anaconda.log."])
+        return ret
+
+    emit_progress(100, "Kushagra OS installed cleanly! Ready to restart into Setup Wizard.", [
+        "Installation completed with exit code 0.",
+        "Stage 2 OOBE (/var/lib/kushagra-oobe-pending) is armed for first reboot.",
+    ])
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("Usage: kushagra-installer-backend [--scan|--install]", file=sys.stderr)
+        return 2
+
+    action = sys.argv[1]
+    if action == "--scan":
+        print(json.dumps(storage_probe.scan_storage(allow_privileged=(os.geteuid() == 0))))
+        return 0
+
+    if action == "--install":
+        if os.geteuid() != 0:
+            print("Error: --install requires root privileges via pkexec.", file=sys.stderr)
+            return 1
+        try:
+            payload = json.load(sys.stdin)
+        except Exception as exc:
+            print(f"Invalid installer JSON payload: {exc}", file=sys.stderr)
+            return 1
+        return run_install(payload)
+
+    print(f"Unknown action: {action}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Double-click Windows (.exe / .msi) Compatibility Wrapper
+exec /usr/bin/python3 /usr/share/kushagra-os/winrun/main.py "$@"

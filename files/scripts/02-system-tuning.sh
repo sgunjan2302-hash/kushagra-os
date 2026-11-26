@@ -30,26 +30,38 @@ if compgen -G "/etc/sysctl.d/*.conf" > /dev/null; then
     chmod 0644 /etc/sysctl.d/*.conf
 fi
 
-for cfg in /etc/systemd/zram-generator.conf /etc/environment /etc/polkit-1/rules.d/50-kushagra-oobe.rules; do
+for cfg in /etc/systemd/zram-generator.conf /etc/environment /etc/polkit-1/rules.d/50-kushagra-oobe.rules /etc/polkit-1/rules.d/50-kushagra-installer.rules /etc/anaconda/profile.d/kushagra-os.conf /etc/xdg/mimeapps.list; do
     if [ -f "$cfg" ]; then
         chmod 0644 "$cfg"
     fi
 done
 
-# 3. Enforce executable permissions on Kushagra OS system binaries & OOBE helpers
+# 3. Enforce executable permissions on Kushagra OS system binaries & OOBE/Installer helpers
 echo "Setting executable permissions on Kushagra OS scripts..."
 for bin in \
     /usr/bin/kushagra-layout-switch \
     /usr/bin/kushagra-health-check \
     /usr/bin/kushagra-setup \
+    /usr/bin/kushagra-installer \
+    /usr/bin/kushagra-winrun \
     /usr/libexec/kushagra-setup-bootutil \
     /usr/libexec/kushagra-oobe-apply \
-    /usr/libexec/kushagra-apply-user-layout; do
+    /usr/libexec/kushagra-apply-user-layout \
+    /usr/libexec/kushagra-installer-autostart \
+    /usr/libexec/kushagra-installer-backend; do
     if [ -f "$bin" ]; then
         chmod 0755 "$bin"
         echo "Set 0755 permissions on $bin"
     fi
 done
+
+# Refresh desktop & MIME association caches for .exe/.msi WinRun and K-Installer handlers
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications || true
+fi
+if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime || true
+fi
 
 # 4. Security & LiveCD Isolation (Strictly activated ONLY under rd.live.image)
 echo "Locking root password in base image (no baked blank-password backdoors)..."

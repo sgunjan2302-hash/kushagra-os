@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Custom Qt6/QML OEM Live Installer Launcher (Stage 1)
+exec /usr/bin/python3 /usr/share/kushagra-os/installer/main.py "$@"

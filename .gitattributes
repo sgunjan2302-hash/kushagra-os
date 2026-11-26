@@ -18,7 +18,9 @@
 *.service text eol=lf
 *.policy text eol=lf
 *.rules text eol=lf
+*.list text eol=lf
 files/system/usr/bin/* text eol=lf
 files/system/usr/libexec/* text eol=lf
+files/system/usr/share/kushagra-os/livesys/* text eol=lf
 environment text eol=lf
 kwinrc text eol=lf

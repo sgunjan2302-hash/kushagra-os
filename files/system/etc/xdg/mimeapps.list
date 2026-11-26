@@ -1,0 +1,7 @@
+[Default Applications]
+application/vnd.microsoft.portable-executable=kushagra-winrun.desktop
+application/x-ms-dos-executable=kushagra-winrun.desktop
+application/x-msdownload=kushagra-winrun.desktop
+application/x-dosexec=kushagra-winrun.desktop
+application/x-ms-ne-executable=kushagra-winrun.desktop
+application/x-msi=kushagra-winrun.desktop

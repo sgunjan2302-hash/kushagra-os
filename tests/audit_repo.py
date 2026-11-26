@@ -100,14 +100,22 @@ for j in js_files:
 if js_ok:
     record('JS Layout API Validation', 'PASS', 'Both windows-classic.js and modern-floating.js use string lengthMode')
 
-# 6. Line Endings Check (scripts, OOBE Python/QML, systemd unit)
+# 6. Line Endings Check (scripts, OOBE/Installer/WinRun Python/QML, systemd unit, MIME/profile)
 lf_targets = (
     glob.glob('files/scripts/*.sh')
     + glob.glob('files/system/usr/bin/kushagra-*')
     + glob.glob('files/system/usr/libexec/kushagra-*')
     + glob.glob('files/system/usr/share/kushagra-os/oobe/*.py')
     + glob.glob('files/system/usr/share/kushagra-os/oobe/*.qml')
-    + ['files/system/usr/lib/systemd/system/kushagra-oobe.service']
+    + glob.glob('files/system/usr/share/kushagra-os/installer/*.py')
+    + glob.glob('files/system/usr/share/kushagra-os/installer/*.qml')
+    + glob.glob('files/system/usr/share/kushagra-os/winrun/*.py')
+    + [
+        'files/system/usr/share/kushagra-os/livesys/livesys-session-extra',
+        'files/system/usr/lib/systemd/system/kushagra-oobe.service',
+        'files/system/etc/anaconda/profile.d/kushagra-os.conf',
+        'files/system/etc/xdg/mimeapps.list',
+    ]
 )
 crlf_files = []
 for s in lf_targets:
@@ -219,7 +227,7 @@ try:
 except Exception as e:
     record('LiveCD-Only Autologin Isolation', 'FAIL', str(e))
 
-# 12. Graphical Dual-Boot Installer & WebUI Browser Contract (v0.1.9)
+# 12. Graphical Dual-Boot Installer & WebUI Browser Contract (v0.1.9 + v0.2.0 K-Installer)
 try:
     pkgs_cfg = yaml.safe_load(open('recipes/packages.yml', 'r', encoding='utf-8'))
     install_pkgs = pkgs_cfg.get('install', {}).get('packages', [])
@@ -229,8 +237,10 @@ try:
 
     has_anaconda = 'anaconda-live' in install_pkgs and 'partitionmanager' in install_pkgs
     has_firefox_webui = 'firefox' in install_pkgs and 'firefox' not in remove_pkgs
-    has_launcher = os.path.exists(desktop_launcher) and 'Exec=liveinst' in open(desktop_launcher, encoding='utf-8').read()
-    has_just_recipe = 'install-to-disk' in open(just_file, encoding='utf-8').read()
+    launcher_text = open(desktop_launcher, encoding='utf-8').read() if os.path.exists(desktop_launcher) else ''
+    has_launcher = 'Exec=/usr/bin/kushagra-installer' in launcher_text or 'Exec=liveinst' in launcher_text
+    just_text = open(just_file, encoding='utf-8').read()
+    has_just_recipe = 'install-to-disk:' in just_text and 'liveinst' in just_text
 
     if has_anaconda and has_firefox_webui and has_launcher and has_just_recipe:
         record(
@@ -336,5 +346,135 @@ try:
         )
 except Exception as e:
     record('Kushagra Setup OOBE Contract', 'FAIL', str(e))
+
+# 15. Stage 1 Custom Qt6/QML K-Installer Contract (v0.2.0)
+try:
+    required_installer_files = [
+        'files/system/usr/bin/kushagra-installer',
+        'files/system/usr/libexec/kushagra-installer-autostart',
+        'files/system/usr/libexec/kushagra-installer-backend',
+        'files/system/etc/xdg/autostart/kushagra-installer-autostart.desktop',
+        'files/system/usr/share/applications/kushagra-installer.desktop',
+        'files/system/etc/anaconda/profile.d/kushagra-os.conf',
+        'files/system/etc/polkit-1/rules.d/50-kushagra-installer.rules',
+        'files/system/usr/share/polkit-1/actions/org.kushagraos.installer.policy',
+        'files/system/usr/share/kushagra-os/installer/main.py',
+        'files/system/usr/share/kushagra-os/installer/Main.qml',
+        'files/system/usr/share/kushagra-os/installer/storage_probe.py',
+        'files/system/usr/share/kushagra-os/installer/ks_builder.py',
+    ]
+    missing_inst = [p for p in required_installer_files if not os.path.exists(p)]
+
+    for py_path in [
+        'files/system/usr/share/kushagra-os/installer/main.py',
+        'files/system/usr/share/kushagra-os/installer/storage_probe.py',
+        'files/system/usr/share/kushagra-os/installer/ks_builder.py',
+        'files/system/usr/libexec/kushagra-installer-backend',
+    ]:
+        if os.path.exists(py_path):
+            ast.parse(open(py_path, 'r', encoding='utf-8').read(), filename=py_path)
+
+    if os.path.exists('files/system/usr/share/polkit-1/actions/org.kushagraos.installer.policy'):
+        ET.parse('files/system/usr/share/polkit-1/actions/org.kushagraos.installer.policy')
+
+    autostart_sh = open('files/system/usr/libexec/kushagra-installer-autostart', 'r', encoding='utf-8').read()
+    profile_txt = open('files/system/etc/anaconda/profile.d/kushagra-os.conf', 'r', encoding='utf-8').read()
+    probe_txt = open('files/system/usr/share/kushagra-os/installer/storage_probe.py', 'r', encoding='utf-8').read()
+    ks_txt = open('files/system/usr/share/kushagra-os/installer/ks_builder.py', 'r', encoding='utf-8').read()
+    backend_txt = open('files/system/usr/libexec/kushagra-installer-backend', 'r', encoding='utf-8').read()
+    inst_qml = open('files/system/usr/share/kushagra-os/installer/Main.qml', 'r', encoding='utf-8').read()
+    livesys_extra = open('files/system/usr/share/kushagra-os/livesys/livesys-session-extra', 'r', encoding='utf-8').read()
+
+    has_live_gate = 'rd.live.image' in autostart_sh and 'liveuser' in autostart_sh
+    has_profile = 'os_id = kushagra-os' in profile_txt and 'base_profile = fedora-kinoite' in profile_txt
+    has_safety_locks = (
+        'WIN_FSTYPES' in probe_txt
+        and 'ESP_PARTTYPES' in probe_txt
+        and 'MIN_ESP_FREE_MIB = 35' in probe_txt
+        and 'detect_live_disk_paths' in probe_txt
+    )
+    has_ks_handoff = (
+        'clearpart --none' in ks_txt
+        and 'rootpw --lock' in ks_txt
+        and 'firstboot --disable' in ks_txt
+        and '/var/lib/kushagra-oobe-pending' in ks_txt
+        and not re.search(r'^\s*user\s+', ks_txt, re.MULTILINE)
+    )
+    has_anaconda_cmd = '--liveinst' in backend_txt and '--cmdline' in backend_txt and '--kickstart' in backend_txt
+    has_qml_screens = all(k in inst_qml for k in ['Install Kushagra OS', 'Try Live Desktop', 'installLogsText', 'espLowSpace'])
+    has_livesys_kiosk = 'kushagra-installer.desktop' in livesys_extra and 'org.kde.plasma-welcome.desktop' in livesys_extra
+
+    if not missing_inst and has_live_gate and has_profile and has_safety_locks and has_ks_handoff and has_anaconda_cmd and has_qml_screens and has_livesys_kiosk:
+        record(
+            'Kushagra K-Installer Stage 1 Contract',
+            'PASS',
+            'LiveCD kiosk gate, storage/Windows/EFI locks, Anaconda cmdline Kickstart backend, log drawer & OOBE handoff verified',
+        )
+    else:
+        record(
+            'Kushagra K-Installer Stage 1 Contract',
+            'FAIL',
+            f'missing={missing_inst}, has_live_gate={has_live_gate}, has_profile={has_profile}, '
+            f'has_safety_locks={has_safety_locks}, has_ks_handoff={has_ks_handoff}, '
+            f'has_anaconda_cmd={has_anaconda_cmd}, has_qml_screens={has_qml_screens}, has_livesys_kiosk={has_livesys_kiosk}',
+        )
+except Exception as e:
+    record('Kushagra K-Installer Stage 1 Contract', 'FAIL', str(e))
+
+# 16. Universal App Layer Contract (Bazaar, WinRun .exe/.msi, Smart Waydroid ARM)
+try:
+    flatpaks_cfg = yaml.safe_load(open('recipes/flatpaks.yml', 'r', encoding='utf-8'))
+    flatpak_installs = []
+    for cfg in flatpaks_cfg.get('configurations', []):
+        flatpak_installs.extend(cfg.get('install', []))
+
+    has_bazaar = 'io.github.kolunmi.Bazaar' in flatpak_installs
+    has_bottles = 'com.usebottles.bottles' in flatpak_installs
+
+    winrun_files = [
+        'files/system/usr/bin/kushagra-winrun',
+        'files/system/usr/share/kushagra-os/winrun/main.py',
+        'files/system/usr/share/applications/kushagra-winrun.desktop',
+        'files/system/etc/xdg/mimeapps.list',
+    ]
+    missing_winrun = [p for p in winrun_files if not os.path.exists(p)]
+    if os.path.exists('files/system/usr/share/kushagra-os/winrun/main.py'):
+        ast.parse(open('files/system/usr/share/kushagra-os/winrun/main.py', 'r', encoding='utf-8').read())
+
+    winrun_desktop = open('files/system/usr/share/applications/kushagra-winrun.desktop', 'r', encoding='utf-8').read()
+    mimeapps_txt = open('files/system/etc/xdg/mimeapps.list', 'r', encoding='utf-8').read()
+    just_txt = open('files/system/usr/share/ublue-os/just/60-custom.just', 'r', encoding='utf-8').read()
+    tuning_txt = open('files/scripts/02-system-tuning.sh', 'r', encoding='utf-8').read()
+
+    has_mime = (
+        'application/x-ms-dos-executable' in winrun_desktop
+        and 'application/x-msi' in winrun_desktop
+        and 'kushagra-winrun.desktop' in mimeapps_txt
+        and 'update-desktop-database' in tuning_txt
+        and 'update-mime-database' in tuning_txt
+    )
+    has_waydroid_smart = (
+        'GenuineIntel' in just_txt
+        and 'AuthenticAMD' in just_txt
+        and 'libhoudini' in just_txt
+        and 'libndk' in just_txt
+        and 'persist.waydroid.multi_windows' in just_txt
+        and 'MEETS_STRONG_INTEGRITY' in just_txt
+    )
+
+    if has_bazaar and has_bottles and not missing_winrun and has_mime and has_waydroid_smart:
+        record(
+            'Universal App Layer Contract',
+            'PASS',
+            'Bazaar Flathub store, WinRun .exe/.msi MIME handler, and Intel/AMD ARM-aware Waydroid setup verified',
+        )
+    else:
+        record(
+            'Universal App Layer Contract',
+            'FAIL',
+            f'has_bazaar={has_bazaar}, has_bottles={has_bottles}, missing_winrun={missing_winrun}, has_mime={has_mime}, has_waydroid_smart={has_waydroid_smart}',
+        )
+except Exception as e:
+    record('Universal App Layer Contract', 'FAIL', str(e))
 
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)
