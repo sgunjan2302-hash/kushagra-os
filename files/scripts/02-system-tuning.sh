@@ -93,4 +93,40 @@ if [ -f "/etc/skel/Desktop/liveinst.desktop" ]; then
     chmod 0755 /etc/skel/Desktop/liveinst.desktop
 fi
 
+# 6. Kernel Modules Hygiene for BlueBuild initramfs & LiveCD dracut
+# Upstream base images occasionally carry an orphan/partial /usr/lib/modules/<kver> directory
+# (e.g., an out-of-tree module remnant) lacking vmlinuz or core modules like overlay.
+# BlueBuild's initramfs module runs dracut on every /usr/lib/modules/* directory; remove only
+# incomplete/orphan directories while strictly verifying at least one complete kernel remains.
+echo "Auditing /usr/lib/modules for BlueBuild initramfs compatibility..."
+ls -la /usr/lib/modules || true
+rpm -qa 'kernel*' || true
+
+COMPLETE_KERNELS=()
+INCOMPLETE_KERNELS=()
+for kdir in /usr/lib/modules/*/; do
+    [ -d "$kdir" ] || continue
+    kver="$(basename "${kdir%/}")"
+    has_overlay=0
+    if [ -n "$(find "$kdir" -name 'overlay.ko*' -print -quit 2>/dev/null || true)" ] || \
+       { [ -f "${kdir}modules.builtin" ] && grep -q 'overlay\.ko' "${kdir}modules.builtin" 2>/dev/null; }; then
+        has_overlay=1
+    fi
+    if [ -f "${kdir}vmlinuz" ] && [ "$has_overlay" -eq 1 ]; then
+        COMPLETE_KERNELS+=("$kdir")
+    else
+        INCOMPLETE_KERNELS+=("$kdir")
+        echo "Warning: Detected incomplete/orphan kernel module directory: ${kver}"
+    fi
+done
+
+if [ "${#COMPLETE_KERNELS[@]}" -ge 1 ] && [ "${#INCOMPLETE_KERNELS[@]}" -ge 1 ]; then
+    for kdir in "${INCOMPLETE_KERNELS[@]}"; do
+        echo "Pruning incomplete kernel module directory to prevent initramfs/dracut failure: ${kdir}"
+        rm -rf -- "$kdir"
+    done
+elif [ "${#COMPLETE_KERNELS[@]}" -eq 0 ]; then
+    echo "Notice: No complete vmlinuz+overlay kernel detected; skipping pruning for safety."
+fi
+
 echo "==> [Hook 02] System tuning, security isolation & OOBE configuration complete."
