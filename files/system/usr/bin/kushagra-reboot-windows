@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - One-Time Reboot to Dual-Boot Windows
+# Uses efibootmgr --bootnext <BOOTNUM> ONLY, strictly preserving Kushagra OS/Fedora BootOrder.
+# Refuses cleanly on single-OS systems lacking Windows Boot Manager or bootmgfw.efi.
+
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
+EFI_ROOT="/boot/efi/EFI"
+AVAIL_MARKER="/run/kushagra-windows-boot-available"
+MODE="reboot"
+ORIGINAL_ARGS=("$@")
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-reboot-windows [OPTIONS]
+
+Options:
+  --check       Detect Windows Boot Manager & bootmgfw.efi and print BootNum cleanly.
+  --dry-run, -n Verify dual-boot Windows and print 'efibootmgr --bootnext <id>' without rebooting.
+  -h, --help    Show this help message.
+
+Reboots once into Windows Boot Manager via 'efibootmgr --bootnext <BOOTNUM>'
+without altering UEFI BootOrder (Kushagra OS stays the default OS).
+EOF
+}
+
+is_live_session() {
+    grep -qw "rd.live.image" /proc/cmdline 2>/dev/null
+}
+
+notify_error() {
+    local msg="$1"
+    echo "$msg" >&2
+    if [ "$MODE" = "reboot" ] && [ ! -t 1 ]; then
+        if command -v kdialog >/dev/null 2>&1 && [ -n "${DISPLAY:-${WAYLAND_DISPLAY:-}}" ]; then
+            kdialog --error "$msg" 2>/dev/null || true
+        elif command -v notify-send >/dev/null 2>&1 && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+            notify-send --icon=dialog-error "Kushagra Reboot to Windows" "$msg" 2>/dev/null || true
+        fi
+    fi
+}
+
+find_windows_bootnum() {
+    local efiboot_out=""
+    local starred_id=""
+    local plain_id=""
+    local line=""
+
+    if ! command -v efibootmgr >/dev/null 2>&1; then
+        return 1
+    fi
+
+    efiboot_out="$(efibootmgr 2>/dev/null || true)"
+    [ -n "$efiboot_out" ] || return 1
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^Boot([0-9A-Fa-f]{4})\*[[:space:]]+Windows[[:space:]]+Boot[[:space:]]+Manager([[:space:]]|$) ]]; then
+            starred_id="${BASH_REMATCH[1]}"
+            break
+        elif [ -z "$plain_id" ] && [[ "$line" =~ ^Boot([0-9A-Fa-f]{4})[[:space:]]+Windows[[:space:]]+Boot[[:space:]]+Manager([[:space:]]|$) ]]; then
+            plain_id="${BASH_REMATCH[1]}"
+        fi
+    done <<< "$efiboot_out"
+
+    if [ -n "$starred_id" ]; then
+        printf '%s\n' "$starred_id"
+        return 0
+    fi
+    if [ -n "$plain_id" ]; then
+        printf '%s\n' "$plain_id"
+        return 0
+    fi
+    return 1
+}
+
+check_bootmgfw_efi() {
+    # Returns:
+    #   0 -> confirmed present (sets DETECTED_EFI_PATH or marker note)
+    #   1 -> confirmed missing
+    #   2 -> /boot/efi/EFI exists but unreadable as non-root and runtime marker absent
+    DETECTED_EFI_PATH=""
+    if [ ! -d "$EFI_ROOT" ]; then
+        return 1
+    fi
+
+    if [ -r "$EFI_ROOT" ] && [ -x "$EFI_ROOT" ]; then
+        local found=""
+        found="$(find "$EFI_ROOT" -maxdepth 4 -iname 'bootmgfw.efi' -print -quit 2>/dev/null || true)"
+        if [ -n "$found" ]; then
+            DETECTED_EFI_PATH="$found"
+            return 0
+        fi
+        return 1
+    fi
+
+    # Fedora /boot/efi is typically 0700 root:root; rely on boot-time root detector marker for non-root checks
+    if [ -L "$AVAIL_MARKER" ] && [ -x "$AVAIL_MARKER" ]; then
+        DETECTED_EFI_PATH="confirmed via ${AVAIL_MARKER} (root scan)"
+        return 0
+    fi
+
+    return 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check)
+            MODE="check"
+            shift
+            ;;
+        --dry-run|-n)
+            MODE="dry-run"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "[FAIL] Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+DETECTED_EFI_PATH=""
+DETECTED_BOOTNUM=""
+HAS_BOOTNUM=0
+EFI_STATUS=1
+
+if DETECTED_BOOTNUM="$(find_windows_bootnum)"; then
+    HAS_BOOTNUM=1
+fi
+
+check_bootmgfw_efi || EFI_STATUS=$?
+if [ -n "$DETECTED_EFI_PATH" ]; then
+    EFI_STATUS=0
+fi
+
+if [ "$MODE" = "check" ]; then
+    echo "=== Kushagra OS Dual-Boot Windows Detection ==="
+    if is_live_session; then
+        echo "Session Mode: LiveCD (rd.live.image — Windows reboot helper disabled)"
+    fi
+    if [ "$EFI_STATUS" -eq 0 ]; then
+        echo "[PASS] bootmgfw.efi: ${DETECTED_EFI_PATH}"
+    elif [ "$EFI_STATUS" -eq 2 ]; then
+        echo "[INFO] bootmgfw.efi: /boot/efi/EFI requires root privileges to scan directly (run with sudo or pkexec)."
+    else
+        echo "[INFO] bootmgfw.efi: not found under ${EFI_ROOT}"
+    fi
+
+    if [ "$HAS_BOOTNUM" -eq 1 ]; then
+        echo "[PASS] efibootmgr: Windows Boot Manager detected"
+        echo "BootNum: ${DETECTED_BOOTNUM}"
+    else
+        echo "[INFO] efibootmgr: Windows Boot Manager not detected (single-OS system)"
+        echo "BootNum: none"
+    fi
+    exit 0
+fi
+
+if is_live_session; then
+    notify_error "[BLOCKED] Reboot to Windows is disabled in LiveCD sessions (rd.live.image)."
+    exit 1
+fi
+
+if ! command -v efibootmgr >/dev/null 2>&1; then
+    notify_error "[BLOCKED] 'efibootmgr' command not found (UEFI firmware tools required)."
+    exit 1
+fi
+
+if [ "$HAS_BOOTNUM" -ne 1 ]; then
+    notify_error "[BLOCKED] Windows Boot Manager not found in UEFI NVRAM (single-OS system). Refusing reboot."
+    exit 1
+fi
+
+if [ "$EFI_STATUS" -eq 1 ]; then
+    notify_error "[BLOCKED] Windows EFI binary (bootmgfw.efi) not found under ${EFI_ROOT}. Refusing reboot."
+    exit 1
+fi
+
+if [ "$MODE" = "dry-run" ]; then
+    if [ "$EFI_STATUS" -eq 2 ]; then
+        echo "[WARN] /boot/efi/EFI requires root to verify bootmgfw.efi directly; efibootmgr confirms Boot${DETECTED_BOOTNUM}."
+    else
+        echo "[PASS] Verified bootmgfw.efi: ${DETECTED_EFI_PATH}"
+    fi
+    echo "[PASS] Detected Windows Boot Manager (BootNum: ${DETECTED_BOOTNUM})"
+    echo "[DRY-RUN] efibootmgr --bootnext ${DETECTED_BOOTNUM}"
+    echo "[DRY-RUN] systemctl reboot"
+    exit 0
+fi
+
+# Real reboot invocation: elevate via pkexec if non-root so root verifies bootmgfw.efi + sets BootNext
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v pkexec >/dev/null 2>&1; then
+        exec pkexec /usr/bin/kushagra-reboot-windows "${ORIGINAL_ARGS[@]}"
+    else
+        notify_error "[FAIL] Root privileges via 'pkexec' are required to set UEFI BootNext and reboot."
+        exit 1
+    fi
+fi
+
+# Strictly verified as root before touching UEFI NVRAM
+if [ "$EFI_STATUS" -ne 0 ]; then
+    notify_error "[BLOCKED] Windows EFI binary (bootmgfw.efi) not found under ${EFI_ROOT}. Refusing reboot."
+    exit 1
+fi
+
+if ! [[ "$DETECTED_BOOTNUM" =~ ^[0-9A-Fa-f]{4}$ ]]; then
+    notify_error "[FAIL] Invalid UEFI BootNum '${DETECTED_BOOTNUM}'."
+    exit 1
+fi
+
+echo "Setting one-time UEFI BootNext to Boot${DETECTED_BOOTNUM} (Windows Boot Manager)..."
+efibootmgr --bootnext "$DETECTED_BOOTNUM"
+echo "Rebooting into Windows (Kushagra OS remains your default BootOrder OS)..."
+exec systemctl reboot

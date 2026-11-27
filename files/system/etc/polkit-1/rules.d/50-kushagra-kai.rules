@@ -1,0 +1,23 @@
+// Allow active local wheel users cached admin authentication (AUTH_ADMIN_KEEP)
+// for K-AI broker's explicitly allowlisted privileged helpers via pkexec.
+// Never bypasses authentication silently: requires active local session + wheel group.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.policykit.exec") {
+        return;
+    }
+    if (!subject.active || !subject.local || !subject.isInGroup("wheel")) {
+        return;
+    }
+
+    var allowedPrograms = [
+        "/usr/libexec/kushagra-kavach-dns",
+        "/usr/bin/kushagra-reboot-windows",
+        "/usr/libexec/kushagra-lan-mirror",
+        "/usr/libexec/kushagra-usbguard-setup"
+    ];
+
+    var program = action.lookup("program");
+    if (allowedPrograms.indexOf(program) >= 0) {
+        return polkit.Result.AUTH_ADMIN_KEEP;
+    }
+});

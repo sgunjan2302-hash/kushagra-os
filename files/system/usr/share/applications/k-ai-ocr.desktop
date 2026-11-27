@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=K-AI Screen OCR
+GenericName=On-Demand Screen Text Reader
+Comment=Read English and Hindi text from screen once and copy to clipboard (zero storage)
+Exec=/usr/bin/k-ai-ocr
+Icon=/usr/share/kushagra-os/branding/logo-symbol.svg
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=ocr;screen;text;hindi;english;k-ai;
+NoDisplay=false
+StartupNotify=true

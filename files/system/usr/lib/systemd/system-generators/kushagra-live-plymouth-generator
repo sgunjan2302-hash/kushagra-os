@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS Systemd Generator: LiveCD-only Plymouth -> plasmalogin handoff
+# Keeps installed systems (rd.live.image absent) 100% untouched (proven 0-pixel silent boot),
+# while preventing plymouth-quit.service from releasing tty1 prematurely during LiveCD livesys/udev settle.
+
+NORMAL_DIR="${1:-/run/systemd/generator}"
+CMDLINE_FILE="${KUSHAGRA_PROC_CMDLINE:-/proc/cmdline}"
+
+if [ ! -r "$CMDLINE_FILE" ] || ! grep -qw "rd.live.image" "$CMDLINE_FILE" 2>/dev/null; then
+    exit 0
+fi
+
+DROPIN_DIR="${NORMAL_DIR}/plasmalogin.service.d"
+mkdir -p "$DROPIN_DIR"
+
+cat <<'EOF' > "${DROPIN_DIR}/plymouth.conf"
+[Unit]
+Conflicts=plymouth-quit.service
+After=
+After=systemd-user-sessions.service getty@tty1.service kmsconvt@tty1.service plymouth-start.service systemd-logind.service livesys.service
+OnFailure=plymouth-quit.service
+
+[Service]
+ExecStartPre=-/usr/bin/plymouth deactivate
+ExecStartPost=-/usr/bin/plymouth quit --retain-splash
+EOF
+chmod 0644 "${DROPIN_DIR}/plymouth.conf"

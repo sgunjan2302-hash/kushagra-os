@@ -109,25 +109,41 @@ if js_ok:
 lf_targets = (
     glob.glob('files/scripts/*.sh')
     + glob.glob('files/system/usr/bin/kushagra-*')
+    + glob.glob('files/system/usr/bin/k-ai-*')
     + glob.glob('files/system/usr/libexec/kushagra-*')
+    + glob.glob('files/system/usr/libexec/k-ai-*')
     + glob.glob('files/system/usr/share/kushagra-os/oobe/*.py')
     + glob.glob('files/system/usr/share/kushagra-os/oobe/*.qml')
     + glob.glob('files/system/usr/share/kushagra-os/installer/*.py')
     + glob.glob('files/system/usr/share/kushagra-os/installer/*.qml')
     + glob.glob('files/system/usr/share/kushagra-os/winrun/*.py')
     + glob.glob('files/system/usr/share/kushagra-os/apkrun/*.py')
+    + glob.glob('files/system/usr/share/kushagra-os/kai/*.py')
+    + glob.glob('files/system/usr/share/kushagra-os/kai/*.qml')
     + [
+        'files/system/usr/share/kushagra-os/kai/actions.json',
         'files/system/usr/share/kushagra-os/livesys/livesys-session-extra',
+        'files/system/usr/lib/systemd/system-generators/kushagra-live-plymouth-generator',
         'files/system/usr/lib/systemd/system/kushagra-oobe.service',
+        'files/system/usr/lib/systemd/system/kushagra-dualboot-detect.service',
         'files/system/usr/lib/systemd/user/kushagra-installer.service',
         'files/system/usr/lib/systemd/user/kushagra-oobe-ui.service',
+        'files/system/usr/lib/systemd/user/kushagra-glass-guard.service',
+        'files/system/usr/lib/systemd/user/k-ai-engine.socket',
+        'files/system/usr/lib/systemd/user/k-ai-engine.service',
         'files/system/usr/lib/tmpfiles.d/kushagra-oobe.conf',
         'files/system/usr/lib/tmpfiles.d/kushagra-kavach.conf',
         'files/system/usr/lib/bootc/kargs.d/10-kushagra-boot.toml',
         'files/system/etc/plymouth/plymouthd.conf',
         'files/system/etc/dracut.conf.d/plymouth-kms.conf',
+        'files/system/etc/modules-load.d/90-kushagra-ntsync.conf',
+        'files/system/etc/udev/rules.d/90-kushagra-ntsync.rules',
         'files/system/usr/share/plymouth/themes/kushagra/kushagra.plymouth',
         'files/system/etc/xdg/kwinrc',
+        'files/system/etc/xdg/kwinrulesrc',
+        'files/system/etc/xdg/kdeglobals',
+        'files/system/usr/share/color-schemes/KushagraGlassDark.colors',
+        'files/system/usr/share/color-schemes/KushagraGlassLight.colors',
         'files/system/etc/xdg/kglobalshortcutsrc',
         'files/system/etc/xdg/kded6rc',
         'files/system/etc/xdg/plasma-welcomerc',
@@ -140,8 +156,16 @@ lf_targets = (
         'files/system/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf',
         'files/system/etc/systemd/system/usbguard.service.d/10-kushagra-safe.conf',
         'files/system/etc/polkit-1/rules.d/50-kushagra-kavach.rules',
+        'files/system/etc/polkit-1/rules.d/50-kushagra-kai.rules',
         'files/system/usr/share/kio/servicemenus/kushagra-kavach-scan.desktop',
+        'files/system/usr/share/kio/servicemenus/kushagra-resolve-convert.desktop',
         'files/system/usr/share/applications/kushagra-apkrun.desktop',
+        'files/system/usr/share/applications/k-ai-drawer.desktop',
+        'files/system/usr/share/applications/k-ai-followalong.desktop',
+        'files/system/usr/share/applications/k-ai-ocr.desktop',
+        'files/system/usr/share/applications/kushagra-reboot-windows.desktop',
+        'files/system/usr/share/krunner/dbusplugins/k-ai-krunner.desktop',
+        'files/system/usr/share/dbus-1/services/org.kushagraos.KAI.Runner.service',
         'files/system/etc/anaconda/profile.d/kushagra-os.conf',
         'files/system/etc/xdg/mimeapps.list',
         'files/system/etc/issue.net',
@@ -675,24 +699,24 @@ try:
         'find_existing_bottle' in winrun_py
         and 'flatpak install --system' in just_cfg
     )
-    has_v030_branding = (
-        'v0.3.0' in recipe_raw
+    has_v040_branding = (
+        'v0.4.0' in recipe_raw
         and 'v0.1 Prototype' not in recipe_raw
-        and 'v0.3.0' in issue_raw
+        and 'v0.4.0' in issue_raw
         and 'v0.1 Prototype' not in issue_raw
     )
 
-    if has_live_guards and has_app_fixes and has_v030_branding:
+    if has_live_guards and has_app_fixes and has_v040_branding:
         record(
-            'v0.3.0 LiveCD Guards & Branding Contract',
+            'v0.4.0 LiveCD Guards & Branding Contract',
             'PASS',
-            'LiveCD flatpak/bootloader guards, Bottles/system gaming fixes, and v0.3.0 branding verified',
+            'LiveCD flatpak/bootloader guards, Bottles/system gaming fixes, and v0.4.0 branding verified',
         )
     else:
         record(
-            'v0.3.0 LiveCD Guards & Branding Contract',
+            'v0.4.0 LiveCD Guards & Branding Contract',
             'FAIL',
-            f'has_live_guards={has_live_guards}, has_app_fixes={has_app_fixes}, has_v030_branding={has_v030_branding}',
+            f'has_live_guards={has_live_guards}, has_app_fixes={has_app_fixes}, has_v040_branding={has_v040_branding}',
         )
 except Exception as e:
     record('v0.3.0 LiveCD Guards & Branding Contract', 'FAIL', str(e))
@@ -920,5 +944,218 @@ try:
         )
 except Exception as e:
     record('Kushagra Kavach Security Suite Contract', 'FAIL', str(e))
+
+# 21. Safe Liquid Glass UI Contract (Plasma 6.8.3)
+try:
+    recipe_cfg_v4 = yaml.safe_load(open('recipes/recipe.yml', 'r', encoding='utf-8'))
+    modules_v4 = recipe_cfg_v4.get('modules', [])
+    script_idx_v4 = next((i for i, m in enumerate(modules_v4) if m.get('type') == 'script'), -1)
+    initramfs_idx_v4 = next((i for i, m in enumerate(modules_v4) if m.get('type') == 'initramfs'), -1)
+    script_list_v4 = modules_v4[script_idx_v4].get('scripts', []) if script_idx_v4 >= 0 else []
+
+    glass_build_sh = open('files/scripts/04-build-kwin-glass.sh', 'r', encoding='utf-8').read()
+    has_glass_build = (
+        0 <= script_idx_v4 < initramfs_idx_v4
+        and '04-build-kwin-glass.sh' in script_list_v4
+        and 'kwin-devel' in glass_build_sh
+        and 'dnf5 remove' in glass_build_sh
+        and 'jq|' in glass_build_sh
+        and 'copr enable' not in glass_build_sh.lower()
+        and 'copr.fedorainfracloud.org' not in glass_build_sh.lower()
+        and 'stock-blur-fallback' in glass_build_sh
+    )
+
+    kdeglobals_txt = open('files/system/etc/xdg/kdeglobals', 'r', encoding='utf-8').read()
+    kwinrules_txt = open('files/system/etc/xdg/kwinrulesrc', 'r', encoding='utf-8').read()
+    has_palette_and_rules = (
+        os.path.exists('files/system/usr/share/color-schemes/KushagraGlassDark.colors')
+        and os.path.exists('files/system/usr/share/color-schemes/KushagraGlassLight.colors')
+        and 'ColorScheme=KushagraGlassDark' in kdeglobals_txt
+        and 'union' not in kdeglobals_txt.lower()
+        and 'opacityactive=100' in kwinrules_txt
+        and 'opacityactiverule=2' in kwinrules_txt
+    )
+
+    glass_guard_sh = open('files/system/usr/bin/kushagra-glass-guard', 'r', encoding='utf-8').read()
+    glass_toggle_sh = open('files/system/usr/bin/kushagra-glass-toggle', 'r', encoding='utf-8').read()
+    glass_unit_txt = open('files/system/usr/lib/systemd/user/kushagra-glass-guard.service', 'r', encoding='utf-8').read()
+    live_ply_gen = open('files/system/usr/lib/systemd/system-generators/kushagra-live-plymouth-generator', 'r', encoding='utf-8').read()
+    just_v4_1 = open('files/system/usr/share/ublue-os/just/60-custom.just', 'r', encoding='utf-8').read()
+    has_guard_and_toggle = (
+        '4718592' in glass_guard_sh
+        and 'llvmpipe' in glass_guard_sh
+        and 'BlurStrength' in glass_toggle_sh
+        and 'ExecStart=/usr/bin/kushagra-glass-guard' in glass_unit_txt
+        and 'plasmalogin.service.d' in live_ply_gen
+        and 'plymouth.conf' in live_ply_gen
+        and 'rd.live.image' in live_ply_gen
+        and 'toggle-glass' in just_v4_1
+    )
+
+    if has_glass_build and has_palette_and_rules and has_guard_and_toggle:
+        record(
+            'Safe Liquid Glass UI Contract',
+            'PASS',
+            'Ephemeral 6.8.3 build + fallback, opaque CSD kwinrulesrc, Dark/Light glass palettes, and <=4.5 GiB/llvmpipe guard verified',
+        )
+    else:
+        record(
+            'Safe Liquid Glass UI Contract',
+            'FAIL',
+            f'has_glass_build={has_glass_build}, has_palette_and_rules={has_palette_and_rules}, has_guard_and_toggle={has_guard_and_toggle}',
+        )
+except Exception as e:
+    record('Safe Liquid Glass UI Contract', 'FAIL', str(e))
+
+# 22. K-AI Hybrid Engine, Profiler, Broker, Drawer, KRunner & OCR Contract
+try:
+    import json as _json
+
+    pkgs_cfg_v4 = yaml.safe_load(open('recipes/packages.yml', 'r', encoding='utf-8'))
+    pkgs_v4 = pkgs_cfg_v4.get('install', {}).get('packages', [])
+    has_kai_pkgs = all(
+        p in pkgs_v4
+        for p in ['llama-cpp', 'vulkan-tools', 'tesseract', 'tesseract-langpack-hin', 'spectacle', 'wl-clipboard', 'python3-gobject']
+    )
+
+    kai_py_files = [
+        'files/system/usr/bin/k-ai-detect',
+        'files/system/usr/bin/k-ai-engine',
+        'files/system/usr/libexec/k-ai-broker',
+        'files/system/usr/libexec/k-ai-krunner',
+        'files/system/usr/bin/k-ai-followalong',
+        'files/system/usr/bin/k-ai-ocr',
+        'files/system/usr/share/kushagra-os/kai/main.py',
+    ]
+    shell_true_hits = []
+    for ppath in kai_py_files:
+        tree = ast.parse(open(ppath, 'r', encoding='utf-8').read(), filename=ppath)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg == 'shell' and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                        shell_true_hits.append(ppath)
+
+    detect_py = open('files/system/usr/bin/k-ai-detect', 'r', encoding='utf-8').read()
+    engine_py = open('files/system/usr/bin/k-ai-engine', 'r', encoding='utf-8').read()
+    tuning_v4 = open('files/scripts/02-system-tuning.sh', 'r', encoding='utf-8').read()
+    has_core_engine = (
+        'TIER1_MAX_RAM_GIB' in detect_py
+        and 'TIER2_MAX_RAM_GIB' in detect_py
+        and 'HYBRID_VRAM_MAX_GIB' in detect_py
+        and 'DEFAULT_IDLE_TIMEOUT = 300' in engine_py
+        and os.path.exists('files/system/usr/lib/systemd/user/k-ai-engine.socket')
+        and os.path.exists('files/system/usr/lib/systemd/user/k-ai-engine.service')
+        and 'systemctl --global enable k-ai-engine.socket' in tuning_v4
+        and 'systemctl --global disable k-ai-engine.service' in tuning_v4
+    )
+
+    actions_cfg = _json.loads(open('files/system/usr/share/kushagra-os/kai/actions.json', 'r', encoding='utf-8').read())
+    actions_map = actions_cfg.get('actions', {})
+    required_actions = ['kavach_dns', 'glass_toggle', 'layout_switch', 'kavach_scan', 'resolve_convert', 'health_report', 'reboot_windows']
+    broker_py = open('files/system/usr/libexec/k-ai-broker', 'r', encoding='utf-8').read()
+    polkit_kai = open('files/system/etc/polkit-1/rules.d/50-kushagra-kai.rules', 'r', encoding='utf-8').read()
+    has_broker_policy = (
+        all(a in actions_map for a in required_actions)
+        and '--approved' in broker_py
+        and 'os.path.realpath' in broker_py
+        and 'os.path.commonpath' in broker_py
+        and 'audit.jsonl' in broker_py
+        and 'org.freedesktop.policykit.exec' in polkit_kai
+    )
+
+    krunner_py = open('files/system/usr/libexec/k-ai-krunner', 'r', encoding='utf-8').read()
+    krunner_desk = open('files/system/usr/share/krunner/dbusplugins/k-ai-krunner.desktop', 'r', encoding='utf-8').read()
+    krunner_dbus = open('files/system/usr/share/dbus-1/services/org.kushagraos.KAI.Runner.service', 'r', encoding='utf-8').read()
+    ocr_py = open('files/system/usr/bin/k-ai-ocr', 'r', encoding='utf-8').read()
+    xdg_sc_v4 = open('files/system/etc/xdg/kglobalshortcutsrc', 'r', encoding='utf-8').read()
+    skel_sc_v4 = open('files/system/etc/skel/.config/kglobalshortcutsrc', 'r', encoding='utf-8').read()
+    apply_layout_v4 = open('files/system/usr/libexec/kushagra-apply-user-layout', 'r', encoding='utf-8').read()
+    has_ui_and_ux = (
+        os.path.exists('files/system/usr/share/kushagra-os/kai/Main.qml')
+        and os.path.exists('files/system/usr/bin/k-ai-drawer')
+        and os.path.exists('files/system/usr/share/applications/k-ai-drawer.desktop')
+        and os.path.exists('files/system/usr/share/applications/k-ai-followalong.desktop')
+        and os.path.exists('files/system/usr/share/applications/k-ai-ocr.desktop')
+        and 'Variant("(a(sssida{sv}))"' in krunner_py
+        and 'Variant("(a(sss))"' in krunner_py
+        and 'org.kushagraos.KAI.Runner' in krunner_desk
+        and 'Exec=/usr/libexec/k-ai-krunner' in krunner_dbus
+        and '_shred_file' in ocr_py
+        and 'k-ai-drawer.desktop' in xdg_sc_v4 and 'Meta+Space' in xdg_sc_v4
+        and 'k-ai-followalong.desktop' in xdg_sc_v4 and 'Ctrl+Shift+A' in xdg_sc_v4
+        and 'k-ai-drawer.desktop' in skel_sc_v4 and 'k-ai-followalong.desktop' in skel_sc_v4
+        and 'k-ai-drawer.desktop' in apply_layout_v4 and 'k-ai-followalong.desktop' in apply_layout_v4
+        and 'Edit Tiles=Meta+T' in xdg_sc_v4
+    )
+
+    if has_kai_pkgs and not shell_true_hits and has_core_engine and has_broker_policy and has_ui_and_ux:
+        record(
+            'K-AI Hybrid Engine, Broker, UI, KRunner & OCR Contract',
+            'PASS',
+            '3-tier profiler, 0MB lazy socket/300s unload, allowlisted broker, GLib.Variant KRunner, FollowAlong/OCR & shortcuts verified',
+        )
+    else:
+        record(
+            'K-AI Hybrid Engine, Broker, UI, KRunner & OCR Contract',
+            'FAIL',
+            f'has_kai_pkgs={has_kai_pkgs}, shell_true_hits={shell_true_hits}, has_core_engine={has_core_engine}, has_broker_policy={has_broker_policy}, has_ui_and_ux={has_ui_and_ux}',
+        )
+except Exception as e:
+    record('K-AI Hybrid Engine, Broker, UI, KRunner & OCR Contract', 'FAIL', str(e))
+
+# 23. Creator & Dual-Boot Bridges + NTSYNC Contract
+try:
+    pkgs_cfg_c4 = yaml.safe_load(open('recipes/packages.yml', 'r', encoding='utf-8'))
+    pkgs_c4 = pkgs_cfg_c4.get('install', {}).get('packages', [])
+    has_bridge_pkgs = all(p in pkgs_c4 for p in ['distrobox', 'freerdp', 'qemu-kvm', 'edk2-ovmf', 'efibootmgr', 'ffmpeg'])
+
+    recipe_cfg_c4 = yaml.safe_load(open('recipes/recipe.yml', 'r', encoding='utf-8'))
+    sys_en_c4 = next((m for m in recipe_cfg_c4.get('modules', []) if m.get('type') == 'systemd'), {}).get('system', {}).get('enabled', [])
+    ntsync_mod = open('files/system/etc/modules-load.d/90-kushagra-ntsync.conf', 'r', encoding='utf-8').read()
+    ntsync_udev = open('files/system/etc/udev/rules.d/90-kushagra-ntsync.rules', 'r', encoding='utf-8').read()
+    has_ntsync_and_unit = (
+        'kushagra-dualboot-detect.service' in sys_en_c4
+        and 'k-ai-engine.service' not in sys_en_c4
+        and 'ntsync' in ntsync_mod
+        and 'KERNEL=="ntsync"' in ntsync_udev
+        and 'MODE="0666"' in ntsync_udev
+        and 'TAG+="uaccess"' in ntsync_udev
+    )
+
+    resolve_setup = open('files/system/usr/libexec/kushagra-resolve-setup', 'r', encoding='utf-8').read()
+    resolve_conv = open('files/system/usr/bin/kushagra-resolve-convert', 'r', encoding='utf-8').read()
+    resolve_kio = open('files/system/usr/share/kio/servicemenus/kushagra-resolve-convert.desktop', 'r', encoding='utf-8').read()
+    winapps_setup = open('files/system/usr/libexec/kushagra-winapps-setup', 'r', encoding='utf-8').read()
+    reboot_win = open('files/system/usr/bin/kushagra-reboot-windows', 'r', encoding='utf-8').read()
+    reboot_desk = open('files/system/usr/share/applications/kushagra-reboot-windows.desktop', 'r', encoding='utf-8').read()
+    dualboot_svc = open('files/system/usr/lib/systemd/system/kushagra-dualboot-detect.service', 'r', encoding='utf-8').read()
+    just_v4_3 = open('files/system/usr/share/ublue-os/just/60-custom.just', 'r', encoding='utf-8').read()
+    has_bridges = (
+        'ghcr.io/zelikos/davincibox:latest' in resolve_setup
+        and 'dnxhr_hq' in resolve_conv
+        and 'kushagra-resolve-convert' in resolve_kio
+        and 'MIN_RAM_KB=' in winapps_setup
+        and 'MIN_DISK_GB=' in winapps_setup
+        and 'efibootmgr --bootnext' in reboot_win
+        and 'TryExec=/run/kushagra-windows-boot-available' in reboot_desk
+        and '/run/kushagra-windows-boot-available' in dualboot_svc
+        and all(r in just_v4_3 for r in ['install-resolve', 'setup-winapps', 'reboot-windows', 'k-ai-status'])
+    )
+
+    if has_bridge_pkgs and has_ntsync_and_unit and has_bridges:
+        record(
+            'Creator & Dual-Boot Bridges + NTSYNC Contract',
+            'PASS',
+            'DaVinci Resolve/DNxHR, KVM/FreeRDP3 WinApps, BootNext Dual-Boot detector & uaccess NTSYNC verified',
+        )
+    else:
+        record(
+            'Creator & Dual-Boot Bridges + NTSYNC Contract',
+            'FAIL',
+            f'has_bridge_pkgs={has_bridge_pkgs}, has_ntsync_and_unit={has_ntsync_and_unit}, has_bridges={has_bridges}',
+        )
+except Exception as e:
+    record('Creator & Dual-Boot Bridges + NTSYNC Contract', 'FAIL', str(e))
 
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)

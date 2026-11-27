@@ -1,0 +1,42 @@
+[General]
+count=3
+rules=kushagra-gtk4,kushagra-chromium-electron,kushagra-flatpak-apps
+
+[kushagra-gtk4]
+Description=Kushagra Glass: GTK4 / Libadwaita opaque text interiors and uniform framing
+blockcompositing=false
+blockcompositingrule=2
+opacityactive=100
+opacityactiverule=2
+opacityinactive=100
+opacityinactiverule=2
+types=1
+wmclass=^org\.gnome\..*
+wmclasscomplete=false
+wmclassmatch=3
+
+[kushagra-chromium-electron]
+Description=Kushagra Glass: Chromium and Electron apps (opaque content, composited framing)
+blockcompositing=false
+blockcompositingrule=2
+opacityactive=100
+opacityactiverule=2
+opacityinactive=100
+opacityinactiverule=2
+types=1
+wmclass=^(chromium|chromium-browser|org\.chromium\.Chromium|google-chrome|brave-browser|code|code-url-handler|com\.visualstudio\.code|discord|com\.discordapp\.Discord)$
+wmclasscomplete=false
+wmclassmatch=3
+
+[kushagra-flatpak-apps]
+Description=Kushagra Glass: Bazaar, OnlyOffice, and desktop Flatpak apps (opaque content, uniform framing)
+blockcompositing=false
+blockcompositingrule=2
+opacityactive=100
+opacityactiverule=2
+opacityinactive=100
+opacityinactiverule=2
+types=1
+wmclass=^(bazaar|io\.github\.kolunmi\.Bazaar|onlyoffice|DesktopEditors|org\.onlyoffice\.desktopeditors|com\.github\.tchx84\.Flatseal|io\.github\.flattool\.Warehouse|io\.missioncenter\.MissionCenter|com\.usebottles\.bottles)$
+wmclasscomplete=false
+wmclassmatch=3

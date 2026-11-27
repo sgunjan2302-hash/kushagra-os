@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""Kushagra OS K-AI FollowAlong Quick-Action Selector (Ctrl+Shift+A).
+
+Reads the highlighted Wayland primary selection (`wl-paste --primary --no-newline`),
+falls back to standard clipboard (`wl-paste --no-newline`) cleanly without failing on
+empty clipboards, and opens a compact frosted-glass Qt6 selector with 4 instant modes:
+Translate (EN<->HI), Summarize, Fix Grammar, and Explain Code.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from PyQt6.QtCore import QByteArray, QObject, QSize, Qt, QUrl, pyqtProperty, pyqtSlot
+from PyQt6.QtGui import QClipboard, QGuiApplication, QWindow
+from PyQt6.QtQml import QQmlApplicationEngine
+
+MAX_DIRECT_CONTEXT_CHARS = 16000
+
+FOLLOWALONG_QML = r"""import QtQuick
+import QtQuick.Window
+import QtQuick.Controls
+import QtQuick.Layouts
+
+Window {
+    id: root
+    visible: true
+    width: 440
+    height: 360
+    minimumWidth: 380
+    minimumHeight: 320
+    flags: Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+    color: "transparent"
+    title: "K-AI FollowAlong"
+
+    property bool isHindi: false
+
+    Shortcut {
+        sequence: "Escape"
+        onActivated: Qt.quit()
+    }
+
+    component ActionModeButton: Button {
+        id: mbtn
+        property string subText: ""
+        property string accentColor: "#FF9933"
+        Layout.fillWidth: true
+        implicitHeight: 58
+        hoverEnabled: true
+
+        background: Rectangle {
+            radius: 12
+            color: mbtn.down ? "#2EFFFFFF" : (mbtn.hovered ? "#22FFFFFF" : "#14FFFFFF")
+            border.color: mbtn.hovered ? mbtn.accentColor : "#2EFFFFFF"
+            border.width: mbtn.hovered ? 1.5 : 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 2
+            Text {
+                text: mbtn.text
+                color: "#FFFFFF"
+                font.pixelSize: 13
+                font.weight: Font.DemiBold
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+            Text {
+                text: mbtn.subText
+                color: "#94A3B8"
+                font.pixelSize: 11
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+        }
+    }
+
+    Rectangle {
+        anchors.fill: parent
+        radius: 16
+        color: "#EB0B1120"
+        border.color: "#38FFFFFF"
+        border.width: 1
+        clip: true
+
+        Rectangle {
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 2
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: "#FF9933" }
+                GradientStop { position: 0.5; color: "#99FFFFFF" }
+                GradientStop { position: 1.0; color: "#138808" }
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 12
+
+            // Draggable Header
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Item {
+                    Layout.fillWidth: true
+                    implicitHeight: 28
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton
+                        onPressed: root.startSystemMove()
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        Image {
+                            source: kushagraLogoUrl
+                            sourceSize.width: 20
+                            sourceSize.height: 20
+                            fillMode: Image.PreserveAspectFit
+                            visible: status === Image.Ready
+                        }
+
+                        Text {
+                            text: root.isHindi ? "K-AI फ़ॉलो-अलॉन्ग" : "K-AI FollowAlong"
+                            color: "#FFFFFF"
+                            font.pixelSize: 14
+                            font.weight: Font.Bold
+                        }
+
+                        Rectangle {
+                            radius: 6
+                            color: "#22FF9933"
+                            border.color: "#55FF9933"
+                            border.width: 1
+                            implicitHeight: 20
+                            implicitWidth: hintTxt.implicitWidth + 12
+                            Text {
+                                id: hintTxt
+                                anchors.centerIn: parent
+                                text: followBackend.selectionSource
+                                color: "#FFBD73"
+                                font.pixelSize: 10
+                                font.weight: Font.Medium
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
+                }
+
+                Button {
+                    text: root.isHindi ? "EN" : "हिन्दी"
+                    implicitHeight: 26
+                    leftPadding: 10
+                    rightPadding: 10
+                    hoverEnabled: true
+                    onClicked: root.isHindi = !root.isHindi
+                    background: Rectangle {
+                        radius: 8
+                        color: parent.hovered ? "#28FFFFFF" : "#16FFFFFF"
+                        border.color: "#38FFFFFF"
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: "#E2E8F0"
+                        font.pixelSize: 11
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
+
+                Button {
+                    text: "✕"
+                    implicitWidth: 26
+                    implicitHeight: 26
+                    hoverEnabled: true
+                    onClicked: Qt.quit()
+                    background: Rectangle {
+                        radius: 8
+                        color: parent.hovered ? "#44EF4444" : "#16FFFFFF"
+                        border.color: parent.hovered ? "#EF4444" : "#30FFFFFF"
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: "#FFFFFF"
+                        font.pixelSize: 12
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
+            }
+
+            // Editable preview box of captured selection
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 10
+                color: "#12FFFFFF"
+                border.color: textBox.activeFocus ? "#FF9933" : "#28FFFFFF"
+                border.width: 1
+
+                ScrollView {
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    clip: true
+
+                    TextArea {
+                        id: textBox
+                        text: followBackend.selectedText
+                        placeholderText: root.isHindi
+                            ? "कोई टेक्स्ट चुनें या यहाँ पेस्ट करें..."
+                            : "No active selection found — paste or type text here..."
+                        placeholderTextColor: "#64748B"
+                        color: "#F1F5F9"
+                        font.pixelSize: 12
+                        wrapMode: TextArea.Wrap
+                        background: Item {}
+                    }
+                }
+            }
+
+            // 4 Instant Modes Grid
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                rowSpacing: 8
+                columnSpacing: 8
+
+                ActionModeButton {
+                    text: root.isHindi ? "अनुवाद (EN ↔ HI)" : "Translate (EN ↔ HI)"
+                    subText: root.isHindi ? "अंग्रेज़ी / हिन्दी अनुवाद" : "Bidirectional Hindi & English"
+                    accentColor: "#FF9933"
+                    onClicked: followBackend.launchAction("translate", textBox.text)
+                }
+
+                ActionModeButton {
+                    text: root.isHindi ? "सारांश (Summarize)" : "Summarize"
+                    subText: root.isHindi ? "मुख्य बिंदु संक्षेप में" : "Concise key takeaways"
+                    accentColor: "#22C55E"
+                    onClicked: followBackend.launchAction("summarize", textBox.text)
+                }
+
+                ActionModeButton {
+                    text: root.isHindi ? "व्याकरण सुधारें" : "Fix Grammar"
+                    subText: root.isHindi ? "स्पेलिंग व वाक्य सुधार" : "Polish clarity & grammar"
+                    accentColor: "#38BDF8"
+                    onClicked: followBackend.launchAction("fix_grammar", textBox.text)
+                }
+
+                ActionModeButton {
+                    text: root.isHindi ? "कोड समझें" : "Explain Code"
+                    subText: root.isHindi ? "तर्क, एरर व कमांड" : "Break down logic or errors"
+                    accentColor: "#A855F7"
+                    onClicked: followBackend.launchAction("explain_code", textBox.text)
+                }
+            }
+
+            // Bottom direct chat button
+            Button {
+                Layout.fillWidth: true
+                implicitHeight: 34
+                hoverEnabled: true
+                text: root.isHindi ? "K-AI साइड ड्रॉअर में खोलें" : "Open Context in K-AI Drawer"
+                onClicked: followBackend.launchAction("", textBox.text)
+                background: Rectangle {
+                    radius: 10
+                    color: parent.down ? "#D97706" : (parent.hovered ? "#FFA94D" : "#FF9933")
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: "#060913"
+                    font.pixelSize: 12
+                    font.weight: Font.Bold
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+        }
+    }
+}
+"""
+
+
+def _read_wl_paste(primary: bool) -> str:
+    wl_paste = shutil.which("wl-paste")
+    if not wl_paste:
+        return ""
+    cmd = [wl_paste, "--primary", "--no-newline"] if primary else [wl_paste, "--no-newline"]
+    try:
+        res = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if res.returncode == 0:
+            return res.stdout or ""
+    except Exception:
+        pass
+    return ""
+
+
+def read_selection_or_clipboard(app: QGuiApplication) -> tuple[str, str]:
+    """Read highlighted primary selection, falling back cleanly to clipboard."""
+    primary_text = _read_wl_paste(primary=True)
+    if primary_text.strip():
+        return primary_text, "Primary Selection"
+
+    clip_text = _read_wl_paste(primary=False)
+    if clip_text.strip():
+        return clip_text, "Clipboard"
+
+    try:
+        cb = app.clipboard()
+        if cb is not None:
+            qt_sel = cb.text(QClipboard.Mode.Selection)
+            if qt_sel and qt_sel.strip():
+                return qt_sel, "Selection"
+            qt_clip = cb.text(QClipboard.Mode.Clipboard)
+            if qt_clip and qt_clip.strip():
+                return qt_clip, "Clipboard"
+    except Exception:
+        pass
+
+    return "", "Empty Clipboard"
+
+
+class FollowAlongBackend(QObject):
+    """Bridge exposing selection context and launching k-ai-drawer."""
+
+    def __init__(self, selected_text: str, source_label: str, parent=None):
+        super().__init__(parent)
+        self._selected_text = selected_text
+        self._source_label = source_label
+
+    @pyqtProperty(str, constant=True)
+    def selectedText(self) -> str:
+        return self._selected_text
+
+    @pyqtProperty(str, constant=True)
+    def selectionSource(self) -> str:
+        return self._source_label
+
+    @pyqtSlot(str, str)
+    def launchAction(self, action_mode: str, context_text: str) -> None:
+        drawer_bin = "/usr/bin/k-ai-drawer"
+        if not os.path.exists(drawer_bin):
+            drawer_bin = shutil.which("k-ai-drawer") or drawer_bin
+
+        cmd = [drawer_bin]
+        if action_mode.strip():
+            cmd.extend(["--action", action_mode.strip()])
+
+        cleaned = context_text.strip()
+        if cleaned:
+            if len(cleaned) <= MAX_DIRECT_CONTEXT_CHARS:
+                cmd.extend(["--context", cleaned])
+            else:
+                runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+                fd, tmp_path = tempfile.mkstemp(prefix="kai-ctx-", suffix=".txt", dir=runtime_dir)
+                try:
+                    os.chmod(tmp_path, 0o600)
+                    with os.fdopen(fd, "w", encoding="utf-8") as fp:
+                        fp.write(cleaned)
+                    cmd.extend(["--context-file", tmp_path])
+                except OSError:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    cmd.extend(["--context", cleaned[:MAX_DIRECT_CONTEXT_CHARS]])
+
+        try:
+            subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            print(f"Failed to launch k-ai-drawer: {exc}", file=sys.stderr)
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.quit()
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="k-ai-followalong",
+        description="K-AI FollowAlong quick action selector for highlighted text.",
+    )
+    parser.add_argument("--text", "--context", dest="text", default="", help="Override text")
+    parser.add_argument("--preview", action="store_true", help="Launch with sample text")
+    return parser.parse_args(argv)
+
+
+def _position_window(app: QGuiApplication, win: QWindow) -> None:
+    screen = app.primaryScreen()
+    if not screen and app.screens():
+        screen = app.screens()[0]
+    if not screen:
+        return
+    geo = screen.availableGeometry()
+    if geo.width() <= 0 or geo.height() <= 0:
+        geo = screen.geometry()
+    if geo.width() <= 0 or geo.height() <= 0:
+        return
+    w = min(440, max(360, geo.width() - 32))
+    h = min(370, max(310, geo.height() - 48))
+    x = geo.x() + max(0, (geo.width() - w) // 2)
+    y = geo.y() + max(16, int(geo.height() * 0.18))
+    win.setMinimumSize(QSize(360, 300))
+    win.setScreen(screen)
+    win.setGeometry(x, y, w, h)
+
+
+def main() -> int:
+    args = parse_args(sys.argv[1:])
+
+    try:
+        from PyQt6.QtQuickControls2 import QQuickStyle
+        QQuickStyle.setStyle("Basic")
+    except Exception:
+        pass
+
+    app = QGuiApplication(sys.argv)
+    app.setApplicationName("K-AI FollowAlong")
+    app.setOrganizationName("Kushagra OS")
+
+    if args.text.strip():
+        selected_text = args.text
+        source_label = "Context"
+    elif args.preview:
+        selected_text = "systemctl --user status k-ai-engine.service"
+        source_label = "Preview"
+    else:
+        selected_text, source_label = read_selection_or_clipboard(app)
+
+    engine = QQmlApplicationEngine()
+    backend = FollowAlongBackend(selected_text, source_label, parent=engine)
+
+    logo_path = Path("/usr/share/kushagra-os/branding/logo-symbol.svg")
+    if not logo_path.exists():
+        logo_path = Path(__file__).resolve().parents[1] / "share" / "kushagra-os" / "branding" / "logo-symbol.svg"
+
+    ctx = engine.rootContext()
+    ctx.setContextProperty("followBackend", backend)
+    ctx.setContextProperty("kushagraLogoUrl", QUrl.fromLocalFile(str(logo_path)))
+
+    engine.loadData(QByteArray(FOLLOWALONG_QML.encode("utf-8")))
+    if not engine.rootObjects():
+        return 1
+
+    win = engine.rootObjects()[0]
+    if isinstance(win, QWindow):
+        _position_window(app, win)
+
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

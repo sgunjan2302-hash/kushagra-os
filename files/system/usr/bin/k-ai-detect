@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""Kushagra OS K-AI Hardware Profiler & Tier Classifier.
+
+Profiles system RAM (/proc/meminfo) and GPU VRAM (AMD sysfs, NVIDIA nvidia-smi,
+Vulkan summary, and lspci) and classifies the host into one of three K-AI tiers.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+BYTES_PER_GIB = 1024 ** 3
+MIB_PER_GIB = 1024.0
+
+TIER1_MAX_RAM_GIB = 6.5
+TIER2_MAX_RAM_GIB = 14.5
+HYBRID_VRAM_MAX_GIB = 4.5
+
+TIER2_MODEL = "Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+TIER3_MODEL = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+
+
+def read_ram_gib(meminfo_path: str | Path = "/proc/meminfo") -> float:
+    """Parse MemTotal from /proc/meminfo and return total RAM in GiB."""
+    text = Path(meminfo_path).read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"^MemTotal:\s+(\d+)\s+kB", text, re.MULTILINE)
+    if not match:
+        raise ValueError(f"Could not find MemTotal in {meminfo_path}")
+    mem_kib = int(match.group(1))
+    return (mem_kib * 1024.0) / BYTES_PER_GIB
+
+
+def probe_amd_vram_gib(drm_root: str | Path = "/sys/class/drm") -> tuple[float, list[str]]:
+    """Read dedicated VRAM size from AMD DRM sysfs nodes."""
+    root = Path(drm_root)
+    if not root.is_dir():
+        return 0.0, []
+
+    max_vram_gib = 0.0
+    gpus: list[str] = []
+    for vram_file in sorted(root.glob("card*/device/mem_info_vram_total")):
+        card_name = vram_file.parent.parent.name
+        if "-" in card_name:
+            continue
+        try:
+            raw_bytes = int(vram_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if raw_bytes <= 0:
+            continue
+        vram_gib = raw_bytes / BYTES_PER_GIB
+        max_vram_gib = max(max_vram_gib, vram_gib)
+        vendor_file = vram_file.parent / "vendor"
+        vendor = ""
+        if vendor_file.is_file():
+            try:
+                vendor_id = vendor_file.read_text(encoding="utf-8").strip().lower()
+                if vendor_id == "0x1002":
+                    vendor = "AMD Radeon GPU"
+                elif vendor_id == "0x10de":
+                    vendor = "NVIDIA GPU"
+                elif vendor_id == "0x8086":
+                    vendor = "Intel GPU"
+                else:
+                    vendor = f"DRM GPU ({vendor_id})"
+            except OSError:
+                vendor = "DRM GPU"
+        else:
+            vendor = "DRM GPU"
+        gpus.append(f"{vendor} ({card_name}, {vram_gib:.2f} GiB VRAM)")
+    return max_vram_gib, gpus
+
+
+def probe_nvidia_vram_gib() -> tuple[float, list[str]]:
+    """Query dedicated VRAM from nvidia-smi if available."""
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return 0.0, []
+    try:
+        proc = subprocess.run(
+            [smi, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0.0, []
+
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return 0.0, []
+
+    max_vram_gib = 0.0
+    gpus: list[str] = []
+    for line in proc.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 2:
+            continue
+        name = parts[0]
+        try:
+            mem_mib = float(parts[1])
+        except ValueError:
+            continue
+        if mem_mib <= 0:
+            continue
+        vram_gib = mem_mib / MIB_PER_GIB
+        max_vram_gib = max(max_vram_gib, vram_gib)
+        gpus.append(f"{name} ({vram_gib:.2f} GiB VRAM)")
+    return max_vram_gib, gpus
+
+
+def probe_vulkan_summary() -> dict[str, Any]:
+    """Probe vulkaninfo --summary for hardware Vulkan GPU availability."""
+    vulkaninfo = shutil.which("vulkaninfo")
+    if not vulkaninfo:
+        return {"status": "unavailable", "has_hw_vulkan": False, "devices": []}
+    try:
+        proc = subprocess.run(
+            [vulkaninfo, "--summary"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"status": "error", "has_hw_vulkan": False, "devices": []}
+
+    if proc.returncode != 0:
+        return {"status": "error", "has_hw_vulkan": False, "devices": []}
+
+    has_hw_vulkan = False
+    devices: list[str] = []
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if "deviceType" in stripped:
+            if any(
+                tag in stripped
+                for tag in (
+                    "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU",
+                    "PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU",
+                    "PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU",
+                )
+            ):
+                has_hw_vulkan = True
+        elif "deviceName" in stripped and "=" in stripped:
+            dev_name = stripped.split("=", 1)[1].strip()
+            if dev_name:
+                devices.append(dev_name)
+
+    return {
+        "status": "ok",
+        "has_hw_vulkan": has_hw_vulkan,
+        "devices": devices,
+    }
+
+
+def probe_lspci_gpus() -> list[str]:
+    """List GPU controllers reported by lspci."""
+    lspci = shutil.which("lspci")
+    if not lspci:
+        return []
+    try:
+        proc = subprocess.run(
+            [lspci],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+
+    controllers: list[str] = []
+    for line in proc.stdout.splitlines():
+        if re.search(r"(VGA compatible controller|3D controller|Display controller):", line, re.IGNORECASE):
+            controllers.append(line.strip())
+    return controllers
+
+
+def classify_hardware(
+    ram_gib: float,
+    vram_gib: float = 0.0,
+    gpus: list[str] | None = None,
+    vulkan_available: bool | None = None,
+) -> dict[str, Any]:
+    """Classify system RAM and GPU VRAM into Kushagra K-AI tiers."""
+    ram_val = max(0.0, float(ram_gib))
+    vram_val = max(0.0, float(vram_gib))
+    effective_vulkan = (vram_val > 0.0) if vulkan_available is None else bool(vulkan_available)
+
+    models_dir = str(Path(os.path.expanduser("~")) / ".local" / "share" / "k-ai" / "models")
+
+    if ram_val <= TIER1_MAX_RAM_GIB:
+        tier = 1
+        tier_name = "cloud_only"
+        recommended_model: str | None = None
+        local_enabled = False
+        ctx_size = 0
+        hybrid_offload = False
+        gpu_layers = 0
+        gpu_backend = "none"
+        message = (
+            "Tier 1 (cloud_only): System RAM <= 6.5 GiB. Local LLM inference is disabled "
+            "(0 MB local model RAM). Configure an optional Cloud API key (OpenAI-compatible, "
+            "Gemini, or Groq) via 'k-ai-engine set-key' or K-AI Settings."
+        )
+    elif ram_val < TIER2_MAX_RAM_GIB:
+        tier = 2
+        tier_name = "local_medium"
+        recommended_model = TIER2_MODEL
+        local_enabled = True
+        ctx_size = 4096
+        if effective_vulkan and 0.0 < vram_val <= HYBRID_VRAM_MAX_GIB:
+            hybrid_offload = True
+            gpu_layers = 20
+            gpu_backend = "vulkan"
+            offload_note = f"hybrid Vulkan+CPU offload (gpu_layers={gpu_layers}, VRAM={vram_val:.2f} GiB)"
+        elif effective_vulkan and vram_val > HYBRID_VRAM_MAX_GIB:
+            hybrid_offload = False
+            gpu_layers = 99
+            gpu_backend = "vulkan"
+            offload_note = f"full Vulkan GPU offload (gpu_layers={gpu_layers}, VRAM={vram_val:.2f} GiB)"
+        else:
+            hybrid_offload = False
+            gpu_layers = 0
+            gpu_backend = "cpu"
+            offload_note = "CPU-only inference (gpu_layers=0)"
+        message = (
+            f"Tier 2 (local_medium): 3B-4B class local model ({recommended_model}) enabled "
+            f"with ctx_size={ctx_size} and {offload_note}. Place GGUF models in {models_dir}."
+        )
+    else:
+        tier = 3
+        tier_name = "local_large"
+        recommended_model = TIER3_MODEL
+        local_enabled = True
+        ctx_size = 8192
+        if effective_vulkan and 0.0 < vram_val <= HYBRID_VRAM_MAX_GIB:
+            hybrid_offload = True
+            gpu_layers = 16
+            gpu_backend = "vulkan"
+            offload_note = f"hybrid Vulkan+CPU offload (gpu_layers={gpu_layers}, VRAM={vram_val:.2f} GiB)"
+        elif effective_vulkan and vram_val > HYBRID_VRAM_MAX_GIB:
+            hybrid_offload = False
+            gpu_layers = 99
+            gpu_backend = "vulkan"
+            offload_note = f"full Vulkan GPU offload (gpu_layers={gpu_layers}, VRAM={vram_val:.2f} GiB)"
+        else:
+            hybrid_offload = False
+            gpu_layers = 0
+            gpu_backend = "cpu"
+            offload_note = "CPU-only inference (gpu_layers=0)"
+        message = (
+            f"Tier 3 (local_large): 7B-8B class local model ({recommended_model}) enabled "
+            f"with ctx_size={ctx_size} and {offload_note}. Place GGUF models in {models_dir}."
+        )
+
+    return {
+        "ram_gib": round(ram_val, 2),
+        "vram_gib": round(vram_val, 2),
+        "tier": tier,
+        "tier_name": tier_name,
+        "recommended_model": recommended_model,
+        "local_enabled": local_enabled,
+        "ctx_size": ctx_size,
+        "hybrid_offload": hybrid_offload,
+        "gpu_layers": gpu_layers,
+        "vulkan_available": effective_vulkan,
+        "gpu_backend": gpu_backend,
+        "gpus": list(gpus) if gpus is not None else [],
+        "models_dir": models_dir,
+        "message": message,
+    }
+
+
+def detect_hardware(
+    meminfo_path: str | Path = "/proc/meminfo",
+    drm_root: str | Path = "/sys/class/drm",
+) -> dict[str, Any]:
+    """Probe live host RAM/VRAM/Vulkan/PCI hardware and classify into K-AI tiers."""
+    ram_gib = read_ram_gib(meminfo_path=meminfo_path)
+    amd_vram, amd_gpus = probe_amd_vram_gib(drm_root=drm_root)
+    nv_vram, nv_gpus = probe_nvidia_vram_gib()
+    vulkan_info = probe_vulkan_summary()
+    pci_gpus = probe_lspci_gpus()
+
+    vram_gib = max(amd_vram, nv_vram)
+    gpus: list[str] = []
+    for item in nv_gpus + amd_gpus + vulkan_info.get("devices", []) + pci_gpus:
+        if item and item not in gpus:
+            gpus.append(item)
+
+    if vulkan_info.get("status") == "ok":
+        vulkan_available = bool(vulkan_info.get("has_hw_vulkan"))
+    else:
+        vulkan_available = vram_gib > 0.0
+
+    return classify_hardware(
+        ram_gib=ram_gib,
+        vram_gib=vram_gib,
+        gpus=gpus,
+        vulkan_available=vulkan_available,
+    )
+
+
+def format_human_report(profile: dict[str, Any]) -> str:
+    """Format hardware profile dictionary as readable terminal output."""
+    gpu_summary = ", ".join(profile["gpus"]) if profile["gpus"] else "None / Integrated (no dedicated VRAM)"
+    lines = [
+        "=== Kushagra OS K-AI Hardware Profile ===",
+        f"System RAM       : {profile['ram_gib']:.2f} GiB",
+        f"Dedicated VRAM   : {profile['vram_gib']:.2f} GiB",
+        f"Detected GPUs    : {gpu_summary}",
+        f"Vulkan Hardware  : {'yes' if profile['vulkan_available'] else 'no'}",
+        f"Tier             : Tier {profile['tier']} ({profile['tier_name']})",
+        f"Local Inference  : {'enabled' if profile['local_enabled'] else 'disabled (0 MB local model RAM)'}",
+        f"Recommended Model: {profile['recommended_model'] or 'None (Cloud API mode)'}",
+        f"Context Size     : {profile['ctx_size']}",
+        f"GPU Offload      : backend={profile['gpu_backend']}, gpu_layers={profile['gpu_layers']}, hybrid_offload={profile['hybrid_offload']}",
+        f"Models Directory : {profile['models_dir']}",
+        f"Guidance         : {profile['message']}",
+    ]
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="k-ai-detect",
+        description="Profile system RAM/VRAM and classify Kushagra OS K-AI hardware tier.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON hardware profile.",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        profile = detect_hardware()
+    except Exception as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+        else:
+            print(f"ERROR: Hardware detection failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(profile, indent=2))
+    else:
+        print(format_human_report(profile))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

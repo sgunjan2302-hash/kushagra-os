@@ -1,0 +1,510 @@
+#!/usr/bin/env python3
+"""Kushagra OS K-AI Sandboxed Action Broker.
+
+Strictly validates action names and parameters against the immutable allowlist
+in /usr/share/kushagra-os/kai/actions.json, enforces $HOME boundary checks via
+realpath, requires explicit --approved confirmation before execution, invokes
+privileged helpers exclusively through pkexec list-argv, and logs all requests
+to ~/.local/share/k-ai/audit.jsonl.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+DEFAULT_ACTIONS_PATH = Path("/usr/share/kushagra-os/kai/actions.json")
+LOCAL_ACTIONS_FALLBACK = Path(__file__).resolve().parent.parent / "share" / "kushagra-os" / "kai" / "actions.json"
+
+
+class BrokerValidationError(ValueError):
+    """Raised when an action or its arguments fail allowlist or path policy."""
+
+
+def get_home_dir() -> str:
+    """Return the active user's home directory, respecting HOME overrides."""
+    env_home = os.environ.get("HOME")
+    if env_home:
+        return env_home
+    return os.path.expanduser("~")
+
+
+def get_audit_log_path(home_dir: str | None = None) -> Path:
+    """Return ~/.local/share/k-ai/audit.jsonl for the active user."""
+    base = Path(home_dir) if home_dir is not None else Path(get_home_dir())
+    return base / ".local" / "share" / "k-ai" / "audit.jsonl"
+
+
+def resolve_actions_path(actions_path: str | Path | None = None) -> Path:
+    """Resolve the allowlist JSON file path."""
+    if actions_path is not None:
+        return Path(actions_path)
+    if DEFAULT_ACTIONS_PATH.is_file():
+        return DEFAULT_ACTIONS_PATH
+    if LOCAL_ACTIONS_FALLBACK.is_file():
+        return LOCAL_ACTIONS_FALLBACK
+    return DEFAULT_ACTIONS_PATH
+
+
+def load_actions(actions_path: str | Path | None = None) -> dict[str, dict[str, Any]]:
+    """Load and structurally validate the allowlisted actions map."""
+    path = resolve_actions_path(actions_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("actions"), dict):
+        raise BrokerValidationError(f"Invalid actions allowlist structure in {path}")
+    return data["actions"]
+
+
+def validate_home_realpath(raw_path: Any, home_dir: str | None = None) -> str:
+    """Validate that a user-supplied path exists and resolves strictly inside $HOME."""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise BrokerValidationError("Path argument must be a non-empty string.")
+    if "\x00" in raw_path:
+        raise BrokerValidationError("Path argument contains illegal NUL byte.")
+
+    home_raw = home_dir if home_dir is not None else get_home_dir()
+    if not home_raw or "\x00" in home_raw:
+        raise BrokerValidationError("Active user HOME directory is invalid.")
+
+    home_real = os.path.realpath(home_raw)
+    if not os.path.isdir(home_real):
+        raise BrokerValidationError(f"User home directory does not exist: {home_real}")
+
+    candidate = raw_path
+    if candidate == "~":
+        candidate = home_real
+    elif candidate.startswith("~/") or (os.sep == "\\" and candidate.startswith("~\\")):
+        candidate = os.path.join(home_real, candidate[2:])
+    elif candidate.startswith("~"):
+        raise BrokerValidationError("Cross-user tilde expansion is not permitted.")
+
+    target_real = os.path.realpath(candidate)
+    if not os.path.exists(target_real):
+        raise BrokerValidationError(f"Target path does not exist: {raw_path}")
+
+    try:
+        common = os.path.commonpath([home_real, target_real])
+    except ValueError as exc:
+        raise BrokerValidationError(f"Path resolves outside user home directory: {raw_path}") from exc
+
+    if common != home_real:
+        raise BrokerValidationError(
+            f"Path traversal rejected: {raw_path} resolves to {target_real} outside {home_real}"
+        )
+
+    return target_real
+
+
+def validate_action_request(
+    action_name: str,
+    raw_args: Any,
+    actions: dict[str, dict[str, Any]],
+    home_dir: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], list[str], bool]:
+    """Validate an action and its arguments against the strict allowlist."""
+    if not isinstance(action_name, str) or action_name not in actions:
+        raise BrokerValidationError(f"Action '{action_name}' is not in the allowlist.")
+
+    if raw_args is None:
+        raw_args = {}
+    if not isinstance(raw_args, dict):
+        raise BrokerValidationError("Action arguments must be a JSON object.")
+
+    spec = actions[action_name]
+    arg_specs: dict[str, dict[str, Any]] = spec.get("args", {})
+
+    unknown_keys = sorted(set(raw_args.keys()) - set(arg_specs.keys()))
+    if unknown_keys:
+        raise BrokerValidationError(
+            f"Unknown argument(s) for '{action_name}': {', '.join(unknown_keys)}"
+        )
+
+    validated_args: dict[str, Any] = {}
+    for arg_name, schema in arg_specs.items():
+        required = bool(schema.get("required", False))
+        if arg_name not in raw_args or raw_args[arg_name] is None:
+            if required:
+                raise BrokerValidationError(
+                    f"Missing required argument '{arg_name}' for action '{action_name}'."
+                )
+            continue
+
+        val = raw_args[arg_name]
+        arg_type = schema.get("type")
+        if arg_type == "enum":
+            allowed = schema.get("values", [])
+            if not isinstance(val, str) or val not in allowed:
+                raise BrokerValidationError(
+                    f"Invalid value '{val}' for '{arg_name}'; expected one of {allowed}."
+                )
+            validated_args[arg_name] = val
+        elif arg_type == "home_realpath":
+            validated_args[arg_name] = validate_home_realpath(val, home_dir=home_dir)
+        elif arg_type == "bool_optional":
+            if not isinstance(val, bool):
+                raise BrokerValidationError(
+                    f"Argument '{arg_name}' must be a JSON boolean (true/false)."
+                )
+            validated_args[arg_name] = val
+        else:
+            raise BrokerValidationError(f"Unsupported schema type '{arg_type}' for '{arg_name}'.")
+
+    cmd = str(spec["cmd"])
+    privileged = bool(spec.get("privileged", False))
+    priv_when_not = spec.get("privileged_when_not")
+    if isinstance(priv_when_not, str):
+        if "action" in validated_args:
+            privileged = validated_args["action"] != priv_when_not
+        else:
+            privileged = True
+
+    cmd_argv: list[str] = [cmd]
+    if action_name == "kavach_dns":
+        cmd_argv.append(validated_args["action"])
+    elif action_name == "glass_toggle":
+        cmd_argv.append(validated_args["action"])
+    elif action_name == "layout_switch":
+        cmd_argv.append(validated_args["layout"])
+    elif action_name == "kavach_scan":
+        if validated_args.get("offline") is True:
+            cmd_argv.append("--offline")
+        cmd_argv.extend(["--", validated_args["path"]])
+    elif action_name == "resolve_convert":
+        cmd_argv.append(validated_args["path"])
+    elif action_name == "health_report":
+        pass
+    elif action_name == "reboot_windows":
+        if validated_args.get("dry_run") is True:
+            cmd_argv.append("--dry-run")
+    else:
+        raise BrokerValidationError(f"Unhandled action builder for '{action_name}'.")
+
+    argv = ["pkexec", *cmd_argv] if privileged else cmd_argv
+    return spec, validated_args, argv, privileged
+
+
+def append_audit_record(
+    *,
+    action: str,
+    args: Any,
+    approved: bool,
+    dry_run: bool,
+    status: str,
+    exit_code: int | None,
+    detail: str,
+    audit_path: str | Path | None = None,
+    home_dir: str | None = None,
+) -> Path:
+    """Append a single JSONL audit event to ~/.local/share/k-ai/audit.jsonl."""
+    path = Path(audit_path) if audit_path is not None else get_audit_log_path(home_dir=home_dir)
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+
+    try:
+        username = getpass.getuser()
+    except Exception:
+        username = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "user": username,
+        "action": str(action),
+        "args": args if isinstance(args, dict) else {"raw": str(args)[:256]},
+        "approved": bool(approved),
+        "dry_run": bool(dry_run),
+        "status": status,
+        "exit_code": exit_code,
+        "detail": detail[:512],
+    }
+
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return path
+
+
+def execute_broker_request(
+    *,
+    action: str,
+    args_obj: Any,
+    approved: bool,
+    dry_run: bool = False,
+    actions_path: str | Path | None = None,
+    audit_path: str | Path | None = None,
+    home_dir: str | None = None,
+    timeout_seconds: int = 600,
+) -> tuple[int, dict[str, Any]]:
+    """Validate, enforce approval gate, optionally execute, and audit-log an action."""
+    try:
+        actions = load_actions(actions_path=actions_path)
+    except Exception as exc:
+        detail = f"Failed to load actions allowlist: {exc}"
+        append_audit_record(
+            action=action,
+            args=args_obj,
+            approved=approved,
+            dry_run=dry_run,
+            status="error",
+            exit_code=1,
+            detail=detail,
+            audit_path=audit_path,
+            home_dir=home_dir,
+        )
+        return 1, {"ok": False, "status": "error", "error": detail}
+
+    try:
+        spec, validated_args, argv, privileged = validate_action_request(
+            action_name=action,
+            raw_args=args_obj,
+            actions=actions,
+            home_dir=home_dir,
+        )
+    except BrokerValidationError as exc:
+        detail = str(exc)
+        append_audit_record(
+            action=action,
+            args=args_obj,
+            approved=approved,
+            dry_run=dry_run,
+            status="rejected",
+            exit_code=2,
+            detail=detail,
+            audit_path=audit_path,
+            home_dir=home_dir,
+        )
+        return 2, {
+            "ok": False,
+            "status": "rejected",
+            "action": action,
+            "error": detail,
+        }
+
+    if not approved:
+        detail = f"Confirmation required before executing action '{action}'."
+        append_audit_record(
+            action=action,
+            args=validated_args,
+            approved=False,
+            dry_run=dry_run,
+            status="confirmation_required",
+            exit_code=3,
+            detail=detail,
+            audit_path=audit_path,
+            home_dir=home_dir,
+        )
+        return 3, {
+            "ok": False,
+            "status": "confirmation_required",
+            "requires_approval": True,
+            "approved": False,
+            "action": action,
+            "args": validated_args,
+            "privileged": privileged,
+            "argv": argv,
+            "description": spec.get("description", ""),
+            "summary": detail,
+        }
+
+    if dry_run:
+        detail = f"Dry-run validated argv={argv}"
+        append_audit_record(
+            action=action,
+            args=validated_args,
+            approved=True,
+            dry_run=True,
+            status="dry_run",
+            exit_code=0,
+            detail=detail,
+            audit_path=audit_path,
+            home_dir=home_dir,
+        )
+        return 0, {
+            "ok": True,
+            "status": "dry_run",
+            "approved": True,
+            "dry_run": True,
+            "action": action,
+            "args": validated_args,
+            "privileged": privileged,
+            "argv": argv,
+            "description": spec.get("description", ""),
+        }
+
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except FileNotFoundError as exc:
+        detail = f"Executable not found: {exc}"
+        append_audit_record(
+            action=action,
+            args=validated_args,
+            approved=True,
+            dry_run=False,
+            status="error",
+            exit_code=127,
+            detail=detail,
+            audit_path=audit_path,
+            home_dir=home_dir,
+        )
+        return 127, {
+            "ok": False,
+            "status": "error",
+            "approved": True,
+            "action": action,
+            "args": validated_args,
+            "privileged": privileged,
+            "argv": argv,
+            "exit_code": 127,
+            "error": detail,
+        }
+    except subprocess.TimeoutExpired:
+        detail = f"Command timed out after {timeout_seconds}s"
+        append_audit_record(
+            action=action,
+            args=validated_args,
+            approved=True,
+            dry_run=False,
+            status="error",
+            exit_code=124,
+            detail=detail,
+            audit_path=audit_path,
+            home_dir=home_dir,
+        )
+        return 124, {
+            "ok": False,
+            "status": "error",
+            "approved": True,
+            "action": action,
+            "args": validated_args,
+            "privileged": privileged,
+            "argv": argv,
+            "exit_code": 124,
+            "error": detail,
+        }
+
+    status = "ok" if proc.returncode == 0 else "failed"
+    detail = f"Exited with code {proc.returncode}"
+    append_audit_record(
+        action=action,
+        args=validated_args,
+        approved=True,
+        dry_run=False,
+        status=status,
+        exit_code=proc.returncode,
+        detail=detail,
+        audit_path=audit_path,
+        home_dir=home_dir,
+    )
+    return proc.returncode, {
+        "ok": proc.returncode == 0,
+        "status": status,
+        "approved": True,
+        "dry_run": False,
+        "action": action,
+        "args": validated_args,
+        "privileged": privileged,
+        "argv": argv,
+        "exit_code": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="k-ai-broker",
+        description="Sandboxed Polkit-aware action broker for Kushagra OS K-AI.",
+    )
+    parser.add_argument("--action", help="Allowlisted action name from actions.json.")
+    parser.add_argument(
+        "--args-json",
+        default="{}",
+        help="JSON object of arguments for the action (default: '{}').",
+    )
+    parser.add_argument(
+        "--approved",
+        action="store_true",
+        help="Explicit user approval flag required before executing any action.",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List all allowlisted actions and their argument schemas as JSON.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and compute target argv without executing the subprocess.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    parsed = parser.parse_args(argv)
+
+    if parsed.list:
+        try:
+            actions = load_actions()
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+            return 1
+        print(json.dumps({"ok": True, "actions": actions}, indent=2))
+        return 0
+
+    if not parsed.action:
+        print(
+            json.dumps(
+                {"ok": False, "status": "rejected", "error": "--action is required unless --list is used."},
+                indent=2,
+            )
+        )
+        return 2
+
+    try:
+        args_obj = json.loads(parsed.args_json)
+    except json.JSONDecodeError as exc:
+        detail = f"Invalid JSON in --args-json: {exc}"
+        append_audit_record(
+            action=parsed.action,
+            args={"raw_args_json": parsed.args_json},
+            approved=parsed.approved,
+            dry_run=parsed.dry_run,
+            status="rejected",
+            exit_code=2,
+            detail=detail,
+        )
+        print(json.dumps({"ok": False, "status": "rejected", "error": detail}, indent=2))
+        return 2
+
+    rc, payload = execute_broker_request(
+        action=parsed.action,
+        args_obj=args_obj,
+        approved=parsed.approved,
+        dry_run=parsed.dry_run,
+    )
+    print(json.dumps(payload, indent=2))
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

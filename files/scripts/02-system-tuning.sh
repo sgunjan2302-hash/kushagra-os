@@ -36,9 +36,14 @@ for cfg in \
     /etc/polkit-1/rules.d/50-kushagra-oobe.rules \
     /etc/polkit-1/rules.d/50-kushagra-installer.rules \
     /etc/polkit-1/rules.d/50-kushagra-kavach.rules \
+    /etc/polkit-1/rules.d/50-kushagra-kai.rules \
     /etc/anaconda/profile.d/kushagra-os.conf \
+    /etc/modules-load.d/90-kushagra-ntsync.conf \
+    /etc/udev/rules.d/90-kushagra-ntsync.rules \
     /etc/xdg/mimeapps.list \
     /etc/xdg/kwinrc \
+    /etc/xdg/kwinrulesrc \
+    /etc/xdg/kdeglobals \
     /etc/xdg/kglobalshortcutsrc \
     /etc/xdg/kded6rc \
     /etc/xdg/plasma-welcomerc \
@@ -53,12 +58,28 @@ for cfg in \
     /usr/lib/bootc/kargs.d/10-kushagra-boot.toml \
     /usr/lib/systemd/user/kushagra-installer.service \
     /usr/lib/systemd/user/kushagra-oobe-ui.service \
+    /usr/lib/systemd/user/kushagra-glass-guard.service \
+    /usr/lib/systemd/user/k-ai-engine.socket \
+    /usr/lib/systemd/user/k-ai-engine.service \
+    /usr/lib/systemd/system/kushagra-dualboot-detect.service \
     /usr/lib/tmpfiles.d/kushagra-kavach.conf \
     /usr/share/plymouth/themes/kushagra/kushagra.plymouth \
     /usr/share/plymouth/themes/kushagra/watermark.png \
     /usr/share/pixmaps/kushagra-logo.png \
+    /usr/share/color-schemes/KushagraGlassDark.colors \
+    /usr/share/color-schemes/KushagraGlassLight.colors \
+    /usr/share/kushagra-os/kai/actions.json \
+    /usr/share/kushagra-os/kai/main.py \
+    /usr/share/kushagra-os/kai/Main.qml \
     /usr/share/kio/servicemenus/kushagra-kavach-scan.desktop \
+    /usr/share/kio/servicemenus/kushagra-resolve-convert.desktop \
     /usr/share/applications/kushagra-apkrun.desktop \
+    /usr/share/applications/k-ai-drawer.desktop \
+    /usr/share/applications/k-ai-followalong.desktop \
+    /usr/share/applications/k-ai-ocr.desktop \
+    /usr/share/applications/kushagra-reboot-windows.desktop \
+    /usr/share/krunner/dbusplugins/k-ai-krunner.desktop \
+    /usr/share/dbus-1/services/org.kushagraos.KAI.Runner.service \
     /etc/skel/.config/kwinrc \
     /etc/skel/.config/kglobalshortcutsrc \
     /etc/skel/.config/fcitx5/profile \
@@ -68,6 +89,10 @@ for cfg in \
         chmod 0644 "$cfg"
     fi
 done
+
+if [ -d /usr/share/kushagra-os/kai ]; then
+    chmod 0755 /usr/share/kushagra-os/kai
+fi
 
 # 3. Enforce executable permissions on Kushagra OS system binaries & OOBE/Installer helpers
 echo "Setting executable permissions on Kushagra OS scripts..."
@@ -79,6 +104,15 @@ for bin in \
     /usr/bin/kushagra-winrun \
     /usr/bin/kushagra-apkrun \
     /usr/bin/kushagra-kavach-scan \
+    /usr/bin/kushagra-glass-toggle \
+    /usr/bin/kushagra-glass-guard \
+    /usr/bin/k-ai-detect \
+    /usr/bin/k-ai-engine \
+    /usr/bin/k-ai-drawer \
+    /usr/bin/k-ai-followalong \
+    /usr/bin/k-ai-ocr \
+    /usr/bin/kushagra-resolve-convert \
+    /usr/bin/kushagra-reboot-windows \
     /usr/libexec/kushagra-setup-bootutil \
     /usr/libexec/kushagra-oobe-apply \
     /usr/libexec/kushagra-apply-user-layout \
@@ -86,7 +120,12 @@ for bin in \
     /usr/libexec/kushagra-installer-backend \
     /usr/libexec/kushagra-kavach-dns \
     /usr/libexec/kushagra-usbguard-setup \
-    /usr/libexec/kushagra-lan-mirror; do
+    /usr/libexec/kushagra-lan-mirror \
+    /usr/libexec/k-ai-broker \
+    /usr/libexec/k-ai-krunner \
+    /usr/libexec/kushagra-resolve-setup \
+    /usr/libexec/kushagra-winapps-setup \
+    /usr/lib/systemd/system-generators/kushagra-live-plymouth-generator; do
     if [ -f "$bin" ]; then
         chmod 0755 "$bin"
         echo "Set 0755 permissions on $bin"
@@ -100,6 +139,13 @@ fi
 
 # Strictly keep USBGuard opt-in (disabled by default until HID whitelist generated via ujust setup-usbguard)
 systemctl disable usbguard.service 2>/dev/null || true
+
+# Enable K-AI lazy inference socket globally (0 MB idle model RAM; never enable k-ai-engine.service directly)
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --global enable k-ai-engine.socket 2>/dev/null || true
+    systemctl --global disable k-ai-engine.service 2>/dev/null || true
+    systemctl enable kushagra-dualboot-detect.service 2>/dev/null || true
+fi
 
 # Refresh desktop & MIME association caches for .exe/.msi WinRun and K-Installer handlers
 if command -v update-desktop-database >/dev/null 2>&1; then

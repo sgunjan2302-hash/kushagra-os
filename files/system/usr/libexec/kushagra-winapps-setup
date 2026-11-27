@@ -1,0 +1,467 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Opt-In WinApps (KVM + QEMU + FreeRDP 3) Bridge Setup
+# Enables running Microsoft Office / Adobe Photoshop in a user-managed Windows VM
+# via FreeRDP 3 RemoteApp over local loopback (127.0.0.1:3389).
+#
+# Licensing Honesty Policy:
+# - NEVER bundles, activates, fabricates, or bypasses Microsoft Windows / Office / Adobe licensing.
+# - Strictly enforces hardware prerequisites (>= 12 GB RAM, >= 45 GB disk, KVM) before VM provisioning.
+
+MIN_RAM_KB=$((12288 * 1024))
+MIN_DISK_GB=45
+DEFAULT_VM_DISK_GB=64
+
+MODE="check"
+DRY_RUN=0
+FORCE=0
+AUTO_YES=0
+ISO_PATH=""
+VM_RAM_MB=""
+VM_DISK_GB="$DEFAULT_VM_DISK_GB"
+
+WINAPPS_CONF_DIR="${XDG_CONFIG_HOME:-${HOME:-/tmp}/.config}/winapps"
+WINAPPS_CONF_FILE="${WINAPPS_CONF_DIR}/winapps.conf"
+VM_DATA_DIR="${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/kushagra-winapps"
+VM_DISK_FILE="${VM_DATA_DIR}/windows.qcow2"
+VM_LAUNCH_SCRIPT="${VM_DATA_DIR}/launch-windows-vm.sh"
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-winapps-setup [COMMAND] [OPTIONS]
+
+Commands:
+  check | --check       Verify CPU/KVM, >= 12 GB RAM, >= 45 GB disk, FreeRDP 3 & QEMU/Podman.
+  status                Show WinApps configuration, VM disk status, and prerequisite summary.
+  install | setup       Provision local KVM Windows VM launcher and WinApps FreeRDP 3 config.
+
+Options:
+  --dry-run, -n         Run all checks and display setup plan without writing files or VM images.
+  --iso <PATH>          Path to your valid user-owned Windows 10/11 Pro/Enterprise ISO.
+  --ram-mb <MB>         Override guest VM RAM in MB (default: 4096 or 8192 depending on host RAM).
+  --disk-gb <GB>        Sparse QCOW2 virtual disk capacity in GB (default: 64).
+  --yes, -y             Confirm license disclosure non-interactively during install.
+  --force               Override RAM/disk threshold warnings (never bypasses missing /dev/kvm).
+  -h, --help, help      Show this help message.
+EOF
+}
+
+is_live_session() {
+    grep -qw "rd.live.image" /proc/cmdline 2>/dev/null
+}
+
+print_windows_license_disclosure() {
+    echo "--------------------------------------------------------------------------------"
+    echo "WINDOWS LICENSE & COMPATIBILITY DISCLOSURE:"
+    echo "  1. Running Microsoft Office, Adobe Photoshop, or other Windows applications"
+    echo "     via WinApps requires a valid, user-owned Windows 10/11 license and ISO."
+    echo "  2. Windows 10/11 Pro, Enterprise, or Education is required for native RemoteApp"
+    echo "     RDP server support (Windows Home editions lack native RDP server)."
+    echo "  3. Kushagra OS NEVER fabricates, activates, or bypasses Microsoft or Adobe"
+    echo "     product licensing, and NEVER downloads Windows ISOs without user action."
+    echo "--------------------------------------------------------------------------------"
+}
+
+resolve_disk_check_dir() {
+    if [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
+        printf '%s\n' "$HOME"
+    elif [ -d /var/home ]; then
+        printf '%s\n' "/var/home"
+    elif [ -d /var ]; then
+        printf '%s\n' "/var"
+    else
+        printf '%s\n' "/"
+    fi
+}
+
+locate_ovmf_pair() {
+    local code="" vars="" fmt="raw"
+    local entry
+    for entry in \
+        "raw:/usr/share/edk2/ovmf/OVMF_CODE.fd:/usr/share/edk2/ovmf/OVMF_VARS.fd" \
+        "raw:/usr/share/edk2/ovmf/OVMF_CODE_4M.fd:/usr/share/edk2/ovmf/OVMF_VARS_4M.fd" \
+        "qcow2:/usr/share/edk2/ovmf/OVMF_CODE_4M.qcow2:/usr/share/edk2/ovmf/OVMF_VARS_4M.qcow2" \
+        "raw:/usr/share/OVMF/OVMF_CODE.fd:/usr/share/OVMF/OVMF_VARS.fd" \
+        "raw:/usr/share/OVMF/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd" \
+        "qcow2:/usr/share/OVMF/OVMF_CODE_4M.qcow2:/usr/share/OVMF/OVMF_VARS_4M.qcow2"; do
+        fmt="${entry%%:*}"
+        local rest="${entry#*:}"
+        code="${rest%%:*}"
+        vars="${rest#*:}"
+        if [ -f "$code" ] && [ -f "$vars" ]; then
+            printf '%s:%s:%s\n' "$fmt" "$code" "$vars"
+            return 0
+        fi
+    done
+    return 1
+}
+
+run_checks() {
+    HARD_FAIL=0
+    SOFT_FAIL=0
+    DETECTED_FREERDP=""
+    DETECTED_RAM_MB=0
+    local disk_dir avail_gb=0 mem_kb=0
+
+    echo "=== Kushagra OS WinApps (KVM + FreeRDP 3) Prerequisite Check ==="
+
+    if is_live_session; then
+        echo "[FAIL] LiveCD session active (rd.live.image): WinApps VM cannot run in LiveCD mode."
+        HARD_FAIL=1
+    fi
+
+    # (a) CPU virtualization (vmx/svm) + /dev/kvm
+    if grep -Eiq '^flags[[:space:]]*:.*\b(vmx|svm)\b' /proc/cpuinfo 2>/dev/null || grep -Eiq '(vmx|svm)' /proc/cpuinfo 2>/dev/null; then
+        echo "[PASS] CPU hardware virtualization extensions (Intel VT-x / AMD-V: vmx/svm) detected."
+    else
+        echo "[FAIL] CPU virtualization flags (vmx/svm) NOT found in /proc/cpuinfo (enable VT-x/SVM in BIOS/UEFI)."
+        HARD_FAIL=1
+    fi
+
+    if [ -c /dev/kvm ]; then
+        if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "[PASS] KVM character device /dev/kvm exists and is read/write accessible."
+        else
+            echo "[WARN] /dev/kvm exists, but current user lacks rw permissions (ensure membership in 'kvm' group)."
+            SOFT_FAIL=1
+        fi
+    else
+        echo "[FAIL] /dev/kvm does not exist (nested virtualization off or kvm kernel module not loaded)."
+        HARD_FAIL=1
+    fi
+
+    # (b) RAM >= 12 GB (MemTotal >= 12288 * 1024 kB)
+    mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
+    mem_kb="${mem_kb:-0}"
+    DETECTED_RAM_MB=$(( mem_kb / 1024 ))
+    if [ "$mem_kb" -ge "$MIN_RAM_KB" ]; then
+        echo "[PASS] Host RAM: ${DETECTED_RAM_MB} MiB (${mem_kb} kB >= ${MIN_RAM_KB} kB / 12 GB minimum)."
+    else
+        echo "[FAIL] Host RAM: ${DETECTED_RAM_MB} MiB (${mem_kb} kB < ${MIN_RAM_KB} kB / 12 GB minimum)."
+        echo "       Running a Windows VM alongside KDE Plasma on < 12 GB RAM risks severe host OOM instability."
+        SOFT_FAIL=1
+    fi
+
+    # (c) Free disk >= 45 GB on ${HOME:-/var/home} / /var
+    disk_dir="$(resolve_disk_check_dir)"
+    avail_gb="$(df -BG --output=avail "$disk_dir" 2>/dev/null | tail -n1 | tr -dc '0-9' || echo 0)"
+    avail_gb="${avail_gb:-0}"
+    if [ "$avail_gb" -ge "$MIN_DISK_GB" ]; then
+        echo "[PASS] Free disk space on ${disk_dir}: ${avail_gb} GB (>= ${MIN_DISK_GB} GB minimum)."
+    else
+        echo "[FAIL] Free disk space on ${disk_dir}: ${avail_gb} GB (< ${MIN_DISK_GB} GB minimum)."
+        SOFT_FAIL=1
+    fi
+
+    if [ -d /var ] && [ "$disk_dir" != "/var" ]; then
+        local var_gb
+        var_gb="$(df -BG --output=avail /var 2>/dev/null | tail -n1 | tr -dc '0-9' || echo 0)"
+        echo "[INFO] Free disk space on /var: ${var_gb:-0} GB"
+    fi
+
+    # (d) FreeRDP 3 + Podman / QEMU-KVM / OVMF check
+    if command -v xfreerdp3 >/dev/null 2>&1; then
+        DETECTED_FREERDP="xfreerdp3"
+        local frdp_ver
+        frdp_ver="$(xfreerdp3 --version 2>/dev/null | head -n1 || true)"
+        echo "[PASS] FreeRDP 3 found: $(command -v xfreerdp3) (${frdp_ver:-version queried})"
+    elif command -v xfreerdp >/dev/null 2>&1; then
+        DETECTED_FREERDP="xfreerdp"
+        local frdp_ver
+        frdp_ver="$(xfreerdp --version 2>/dev/null | head -n1 || true)"
+        echo "[PASS] FreeRDP found: $(command -v xfreerdp) (${frdp_ver:-version queried})"
+    else
+        echo "[FAIL] Neither 'xfreerdp3' nor 'xfreerdp' (FreeRDP 3) found in PATH."
+        HARD_FAIL=1
+    fi
+
+    if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+        echo "[PASS] QEMU KVM hypervisor found: $(command -v qemu-system-x86_64)"
+    else
+        echo "[FAIL] 'qemu-system-x86_64' (qemu-kvm) not found."
+        HARD_FAIL=1
+    fi
+
+    if command -v podman >/dev/null 2>&1; then
+        echo "[PASS] Podman runtime found: $(command -v podman)"
+    else
+        echo "[WARN] 'podman' not found (native QEMU/KVM path can still operate without Podman)."
+    fi
+
+    if locate_ovmf_pair >/dev/null 2>&1; then
+        local ovmf_info ovmf_rest
+        ovmf_info="$(locate_ovmf_pair)"
+        ovmf_rest="${ovmf_info#*:}"
+        echo "[PASS] OVMF UEFI firmware found: ${ovmf_rest%%:*} (${ovmf_info%%:*})"
+    else
+        echo "[WARN] edk2-ovmf UEFI firmware not found under /usr/share/edk2/ovmf (Windows 11 requires UEFI/OVMF)."
+    fi
+
+    print_windows_license_disclosure
+
+    if [ "$HARD_FAIL" -eq 0 ] && [ "$SOFT_FAIL" -eq 0 ]; then
+        echo "WINAPPS_PREFLIGHT=PASS"
+    elif [ "$HARD_FAIL" -eq 0 ] && [ "$FORCE" -eq 1 ]; then
+        echo "WINAPPS_PREFLIGHT=WARN_FORCED"
+    else
+        echo "WINAPPS_PREFLIGHT=BLOCKED"
+    fi
+}
+
+cmd_status() {
+    run_checks
+    echo ""
+    echo "=== WinApps Staging Status ==="
+    if [ -f "$WINAPPS_CONF_FILE" ]; then
+        echo "[PASS] Config file present: ${WINAPPS_CONF_FILE}"
+    else
+        echo "[INFO] Config file not created yet: ${WINAPPS_CONF_FILE}"
+    fi
+    if [ -f "$VM_DISK_FILE" ]; then
+        echo "[PASS] VM virtual disk present: ${VM_DISK_FILE}"
+    else
+        echo "[INFO] VM virtual disk not created yet: ${VM_DISK_FILE}"
+    fi
+    if [ -x "$VM_LAUNCH_SCRIPT" ]; then
+        echo "[PASS] VM launcher script present: ${VM_LAUNCH_SCRIPT}"
+    else
+        echo "[INFO] VM launcher script not created yet: ${VM_LAUNCH_SCRIPT}"
+    fi
+}
+
+choose_vm_ram_mb() {
+    if [ -n "$VM_RAM_MB" ]; then
+        printf '%s\n' "$VM_RAM_MB"
+    elif [ "$DETECTED_RAM_MB" -ge 20480 ]; then
+        printf '8192\n'
+    else
+        printf '4096\n'
+    fi
+}
+
+cmd_install() {
+    run_checks
+
+    if [ "$HARD_FAIL" -ne 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+        echo "[ABORTED] Missing mandatory KVM/FreeRDP3/QEMU requirements." >&2
+        exit 1
+    fi
+    if [ "$SOFT_FAIL" -ne 0 ] && [ "$FORCE" -ne 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+        echo "[ABORTED] Host RAM (< 12 GB) or disk (< 45 GB) below safe threshold (pass --force to override)." >&2
+        exit 1
+    fi
+
+    if [ -n "$ISO_PATH" ] && [ ! -f "$ISO_PATH" ]; then
+        echo "[FAIL] Provided Windows ISO does not exist: ${ISO_PATH}" >&2
+        exit 1
+    fi
+
+    local guest_ram_mb
+    guest_ram_mb="$(choose_vm_ram_mb)"
+    local freerdp_bin="${DETECTED_FREERDP:-xfreerdp3}"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo ""
+        echo "[DRY-RUN] Planned Kushagra WinApps KVM + FreeRDP 3 setup:"
+        echo "  - Config directory : ${WINAPPS_CONF_DIR}"
+        echo "  - WinApps config   : ${WINAPPS_CONF_FILE} (RDP_IP=127.0.0.1, FREERDP_COMMAND=${freerdp_bin})"
+        echo "  - VM storage dir   : ${VM_DATA_DIR}"
+        echo "  - Sparse QCOW2     : qemu-img create -f qcow2 ${VM_DISK_FILE} ${VM_DISK_GB}G"
+        echo "  - Guest RAM / CPU  : ${guest_ram_mb} MiB RAM, host KVM acceleration (-enable-kvm)"
+        echo "  - Loopback RDP     : hostfwd=tcp:127.0.0.1:3389-:3389 (never exposed on LAN)"
+        if [ -n "$ISO_PATH" ]; then
+            echo "  - Install ISO      : ${ISO_PATH}"
+        fi
+        return 0
+    fi
+
+    if [ "$AUTO_YES" -ne 1 ]; then
+        if [ ! -t 0 ]; then
+            echo "[INFO] Non-interactive shell without --yes; pass --yes to confirm Windows license terms and stage VM files."
+            return 0
+        fi
+        local reply=""
+        read -r -p "Confirm you own a valid Windows 10/11 license and want to stage WinApps VM files? [y/N]: " reply
+        if ! [[ "${reply:-N}" =~ ^[Yy]$ ]]; then
+            echo "[CANCELLED] WinApps setup cancelled by user."
+            return 0
+        fi
+    fi
+
+    if ! command -v qemu-img >/dev/null 2>&1; then
+        echo "[FAIL] 'qemu-img' command not found." >&2
+        exit 1
+    fi
+
+    local ovmf_info ovmf_fmt ovmf_rest ovmf_code ovmf_vars_tmpl ovmf_vars_user
+    if ! ovmf_info="$(locate_ovmf_pair)"; then
+        echo "[FAIL] edk2-ovmf firmware files not found. Ensure 'edk2-ovmf' is installed." >&2
+        exit 1
+    fi
+    ovmf_fmt="${ovmf_info%%:*}"
+    ovmf_rest="${ovmf_info#*:}"
+    ovmf_code="${ovmf_rest%%:*}"
+    ovmf_vars_tmpl="${ovmf_rest#*:}"
+    ovmf_vars_user="${VM_DATA_DIR}/OVMF_VARS.${ovmf_fmt}"
+
+    mkdir -p "$WINAPPS_CONF_DIR" "$VM_DATA_DIR"
+    chmod 0700 "$WINAPPS_CONF_DIR" "$VM_DATA_DIR"
+
+    if [ ! -f "$ovmf_vars_user" ]; then
+        cp -- "$ovmf_vars_tmpl" "$ovmf_vars_user"
+        chmod 0600 "$ovmf_vars_user"
+    fi
+
+    if [ ! -f "$VM_DISK_FILE" ]; then
+        echo "[INFO] Creating sparse ${VM_DISK_GB}G QCOW2 virtual disk at ${VM_DISK_FILE}..."
+        qemu-img create -f qcow2 "$VM_DISK_FILE" "${VM_DISK_GB}G"
+    else
+        echo "[INFO] Reusing existing VM disk: ${VM_DISK_FILE}"
+    fi
+
+    local win_user="winuser"
+    if [ -t 0 ] && [ "$AUTO_YES" -ne 1 ]; then
+        read -r -p "Windows VM username [winuser]: " input_user || true
+        if [ -n "${input_user:-}" ]; then
+            win_user="$input_user"
+        fi
+    fi
+
+    if [ ! -f "$WINAPPS_CONF_FILE" ]; then
+        cat > "$WINAPPS_CONF_FILE" <<EOF
+# Kushagra OS WinApps Configuration (Loopback FreeRDP 3 Bridge)
+# Set RDP_USER and RDP_PASS to match your licensed Windows VM account.
+RDP_USER="${win_user}"
+RDP_PASS=""
+RDP_DOMAIN=""
+RDP_IP="127.0.0.1"
+WAFLAVOR="manual"
+FREERDP_COMMAND="${freerdp_bin}"
+RDP_FLAGS="/cert:tofu /dynamic-resolution"
+RDP_SCALE="100"
+REMOVABLE_MEDIA="/run/media"
+EOF
+        chmod 0600 "$WINAPPS_CONF_FILE"
+        echo "[PASS] Created ${WINAPPS_CONF_FILE} (mode 0600)."
+    else
+        echo "[INFO] Preserving existing ${WINAPPS_CONF_FILE}."
+    fi
+
+    cat > "$VM_LAUNCH_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+ISO_FILE="\${1:-${ISO_PATH}}"
+EXTRA_CDROM=()
+if [ -n "\$ISO_FILE" ]; then
+    if [ ! -f "\$ISO_FILE" ]; then
+        echo "[FAIL] ISO not found: \$ISO_FILE" >&2
+        exit 1
+    fi
+    EXTRA_CDROM=(-drive "file=\${ISO_FILE},media=cdrom,readonly=on")
+fi
+exec qemu-system-x86_64 \\
+    -name "Kushagra-WinApps-VM" \\
+    -enable-kvm \\
+    -machine q35,accel=kvm \\
+    -cpu host \\
+    -smp cores=4,threads=1,sockets=1 \\
+    -m "${guest_ram_mb}" \\
+    -drive "if=pflash,format=${ovmf_fmt},readonly=on,file=${ovmf_code}" \\
+    -drive "if=pflash,format=${ovmf_fmt},file=${ovmf_vars_user}" \\
+    -drive "file=${VM_DISK_FILE},format=qcow2,if=virtio" \\
+    -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:3389-:3389" \\
+    -device virtio-vga-gl \\
+    -display gtk,gl=on \\
+    -usb -device usb-tablet \\
+    "\${EXTRA_CDROM[@]}"
+EOF
+    chmod 0700 "$VM_LAUNCH_SCRIPT"
+
+    echo ""
+    echo "[PASS] Kushagra WinApps KVM + FreeRDP 3 bridge staged cleanly."
+    echo "Next steps:"
+    echo "  1. Boot your licensed Windows ISO inside the local VM:"
+    echo "     ${VM_LAUNCH_SCRIPT} /path/to/Windows11_x64.iso"
+    echo "  2. Inside Windows Pro/Enterprise: enable Remote Desktop & apply WinApps RDPApps.reg."
+    echo "  3. Set your real Windows VM credentials in ${WINAPPS_CONF_FILE}."
+    echo "  4. Connect via FreeRDP 3:"
+    echo "     ${freerdp_bin} /v:127.0.0.1:3389 /u:${win_user} /cert:tofu /dynamic-resolution"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check|check)
+            MODE="check"
+            shift
+            ;;
+        --dry-run|-n)
+            DRY_RUN=1
+            if [ "$MODE" = "check" ]; then
+                MODE="install"
+            fi
+            shift
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        --yes|-y)
+            AUTO_YES=1
+            shift
+            ;;
+        --iso)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+                echo "[FAIL] --iso requires a file path." >&2
+                exit 1
+            fi
+            ISO_PATH="$2"
+            shift 2
+            ;;
+        --ram-mb)
+            if [ $# -lt 2 ] || ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -lt 2048 ]; then
+                echo "[FAIL] --ram-mb requires an integer >= 2048." >&2
+                exit 1
+            fi
+            VM_RAM_MB="$2"
+            shift 2
+            ;;
+        --disk-gb)
+            if [ $# -lt 2 ] || ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -lt 32 ]; then
+                echo "[FAIL] --disk-gb requires an integer >= 32." >&2
+                exit 1
+            fi
+            VM_DISK_GB="$2"
+            shift 2
+            ;;
+        status)
+            MODE="status"
+            shift
+            ;;
+        install|setup)
+            MODE="install"
+            shift
+            ;;
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "[FAIL] Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+case "$MODE" in
+    check)
+        run_checks
+        ;;
+    status)
+        cmd_status
+        ;;
+    install)
+        cmd_install
+        ;;
+esac

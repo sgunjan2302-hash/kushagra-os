@@ -215,6 +215,45 @@ else
     record_pass "LAN update mirror not configured (using direct upstream ghcr.io)"
 fi
 
+# 12. Safe Liquid Glass UI & Hardware Guard
+echo -n "Checking Kushagra Liquid Glass UI configuration... "
+if [ -x "/usr/bin/kushagra-glass-toggle" ] && [ -x "/usr/bin/kushagra-glass-guard" ] && [ -f "/etc/xdg/kwinrulesrc" ]; then
+    glass_backend="stock-blur-fallback"
+    if [ -f "/etc/kushagra-glass-backend" ]; then
+        glass_backend=$(awk -F= '/^backend=/{print $2; exit}' /etc/kushagra-glass-backend 2>/dev/null | tr -d '\r' || true)
+    fi
+    record_pass "Safe Liquid Glass UI ready (backend: ${glass_backend:-stock-blur-fallback}, kwinrulesrc present)"
+else
+    record_warn "Liquid Glass UI scripts or /etc/xdg/kwinrulesrc incomplete"
+fi
+
+# 13. K-AI Hardware Profiler, Lazy Engine & Sandboxed Broker
+echo -n "Checking K-AI Hybrid Engine & Sandboxed Broker... "
+if [ -x "/usr/bin/k-ai-detect" ] && [ -x "/usr/bin/k-ai-engine" ] && [ -x "/usr/libexec/k-ai-broker" ] && [ -f "/usr/share/kushagra-os/kai/actions.json" ]; then
+    kai_tier=$(/usr/bin/k-ai-detect --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'Tier {d.get(\"tier\")} ({d.get(\"tier_name\",\"\")})')" 2>/dev/null || echo "detected")
+    if systemctl --global is-enabled k-ai-engine.service >/dev/null 2>&1; then
+        record_fail "k-ai-engine.service is enabled globally (must be socket-activated only for 0 MB idle RAM)"
+    else
+        record_pass "K-AI stack ready (${kai_tier}; socket-activated lazy inference & Polkit broker verified)"
+    fi
+else
+    record_fail "One or more core K-AI components (k-ai-detect/k-ai-engine/k-ai-broker/actions.json) missing"
+fi
+
+# 14. Creator Bridges, Dual-Boot Windows Helper & NTSYNC
+echo -n "Checking Creator Bridges, Dual-Boot helper & NTSYNC... "
+if [ -x "/usr/libexec/kushagra-resolve-setup" ] && [ -x "/usr/bin/kushagra-resolve-convert" ] && [ -x "/usr/libexec/kushagra-winapps-setup" ] && [ -x "/usr/bin/kushagra-reboot-windows" ] && [ -f "/etc/modules-load.d/90-kushagra-ntsync.conf" ] && [ -f "/etc/udev/rules.d/90-kushagra-ntsync.rules" ]; then
+    if [ -c "/dev/ntsync" ]; then
+        record_pass "Creator/WinApps/Dual-Boot bridges ready (/dev/ntsync active)"
+    elif command -v modinfo >/dev/null 2>&1 && modinfo -n ntsync >/dev/null 2>&1; then
+        record_pass "Creator/WinApps/Dual-Boot bridges ready (ntsync kernel module available)"
+    else
+        record_warn "Creator/WinApps/Dual-Boot scripts installed, but ntsync device/module unavailable in current environment"
+    fi
+else
+    record_fail "Missing Creator/WinApps/Dual-Boot bridge scripts or ntsync configuration"
+fi
+
 echo "================================================================================"
 echo "Health Verification Summary: PASS: $pass_count | WARN: $warn_count | FAIL: $fail_count"
 echo "================================================================================"

@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Safe Liquid Glass Toggle (KDE Plasma 6.8.3 / KWin Wayland)
+# Usage: kushagra-glass-toggle [on|off|auto|force-on|status] [--json] [--force] [--guard]
+
+BACKEND_FILE="${KUSHAGRA_GLASS_BACKEND_FILE:-/etc/kushagra-glass-backend}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}"
+STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}"
+KWINRC="${CONFIG_DIR}/kwinrc"
+MODE_FILE="${CONFIG_DIR}/kushagra-glass-mode"
+GUARD_STATUS_FILE="${STATE_DIR}/kushagra-glass-guard.status"
+
+BACKEND_NAME="stock-blur-fallback"
+BACKEND_PLUGIN=""
+
+load_backend_info() {
+    if [ -f "${BACKEND_FILE}" ]; then
+        local line key val
+        while IFS= read -r line || [ -n "${line}" ]; do
+            line="${line//$'\r'/}"
+            [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+            if [[ "${line}" == *=* ]]; then
+                key="${line%%=*}"
+                val="${line#*=}"
+                key="$(printf '%s' "${key}" | xargs)"
+                val="$(printf '%s' "${val}" | xargs)"
+                case "${key}" in
+                    backend) [ -n "${val}" ] && BACKEND_NAME="${val}" ;;
+                    plugin) BACKEND_PLUGIN="${val}" ;;
+                esac
+            fi
+        done < "${BACKEND_FILE}"
+    fi
+}
+
+read_mode_pref() {
+    local mode="auto"
+    if [ -f "${MODE_FILE}" ]; then
+        local raw
+        raw="$(tr -d '\r' < "${MODE_FILE}" | grep -Ev '^[[:space:]]*(#|$)' | head -n1 || true)"
+        raw="${raw#mode=}"
+        raw="$(printf '%s' "${raw}" | xargs | tr '[:upper:]' '[:lower:]')"
+        case "${raw}" in
+            on|off|auto|force-on) mode="${raw}" ;;
+        esac
+    fi
+    printf '%s' "${mode}"
+}
+
+write_mode_pref() {
+    local mode="$1"
+    mkdir -p "${CONFIG_DIR}"
+    printf '%s\n' "${mode}" > "${MODE_FILE}"
+}
+
+kwinrc_set() {
+    local group="$1"
+    local key="$2"
+    local value="$3"
+    mkdir -p "${CONFIG_DIR}"
+
+    if command -v kwriteconfig6 >/dev/null 2>&1; then
+        kwriteconfig6 --file "${KWINRC}" --group "${group}" --key "${key}" "${value}"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "${KWINRC}" "${group}" "${key}" "${value}" <<'PYEOF'
+import configparser
+import os
+import sys
+
+path, group, key, value = sys.argv[1:5]
+cp = configparser.ConfigParser(interpolation=None, strict=False)
+cp.optionxform = str
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8", errors="replace") as fp:
+        cp.read_file(fp)
+if not cp.has_section(group):
+    cp.add_section(group)
+cp.set(group, key, value)
+with open(path, "w", encoding="utf-8", newline="\n") as fp:
+    cp.write(fp, space_around_delimiters=False)
+PYEOF
+    else
+        echo "ERROR: Neither kwriteconfig6 nor python3 is available to update ${KWINRC}." >&2
+        return 1
+    fi
+}
+
+kwinrc_get() {
+    local group="$1"
+    local key="$2"
+    local default_val="${3:-}"
+
+    if [ ! -f "${KWINRC}" ]; then
+        printf '%s' "${default_val}"
+        return 0
+    fi
+
+    if command -v kreadconfig6 >/dev/null 2>&1; then
+        local val
+        val="$(kreadconfig6 --file "${KWINRC}" --group "${group}" --key "${key}" --default "${default_val}" 2>/dev/null || true)"
+        printf '%s' "${val}"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "${KWINRC}" "${group}" "${key}" "${default_val}" <<'PYEOF'
+import configparser
+import sys
+
+path, group, key, default_val = sys.argv[1:5]
+cp = configparser.ConfigParser(interpolation=None, strict=False)
+cp.optionxform = str
+with open(path, "r", encoding="utf-8", errors="replace") as fp:
+    cp.read_file(fp)
+if cp.has_option(group, key):
+    sys.stdout.write(cp.get(group, key))
+else:
+    sys.stdout.write(default_val)
+PYEOF
+    else
+        printf '%s' "${default_val}"
+    fi
+}
+
+reconfigure_kwin() {
+    local qdbus_bin=""
+    local candidate
+    for candidate in qdbus-qt6 /usr/lib64/qt6/bin/qdbus qdbus6 qdbus; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            qdbus_bin="${candidate}"
+            break
+        fi
+    done
+
+    if [ -n "${qdbus_bin}" ]; then
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 2 "${qdbus_bin}" org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+        else
+            "${qdbus_bin}" org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+apply_glass_state() {
+    local enabled="$1" # "true" or "false"
+
+    kwinrc_set "Plugins" "blurEnabled" "${enabled}"
+    if [ -n "${BACKEND_PLUGIN}" ] && [ "${BACKEND_PLUGIN}" != "blur" ]; then
+        kwinrc_set "Plugins" "${BACKEND_PLUGIN}Enabled" "${enabled}"
+    fi
+    # Always keep stock Translucency off to preserve opaque readable text interiors
+    kwinrc_set "Plugins" "kwin4_effect_translucencyEnabled" "false"
+    kwinrc_set "Effect-blur" "BlurStrength" "6"
+    kwinrc_set "Effect-blur" "NoiseStrength" "2"
+
+    reconfigure_kwin
+}
+
+print_status() {
+    local json_mode="$1"
+    local mode blur_cfg plugin_cfg translucency_cfg blur_strength noise_strength enabled guard_reason guard_action
+
+    mode="$(read_mode_pref)"
+    blur_cfg="$(kwinrc_get "Plugins" "blurEnabled" "unset")"
+    plugin_cfg="unset"
+    if [ -n "${BACKEND_PLUGIN}" ] && [ "${BACKEND_PLUGIN}" != "blur" ]; then
+        plugin_cfg="$(kwinrc_get "Plugins" "${BACKEND_PLUGIN}Enabled" "unset")"
+    fi
+    translucency_cfg="$(kwinrc_get "Plugins" "kwin4_effect_translucencyEnabled" "unset")"
+    blur_strength="$(kwinrc_get "Effect-blur" "BlurStrength" "6")"
+    noise_strength="$(kwinrc_get "Effect-blur" "NoiseStrength" "2")"
+
+    if [ "${blur_cfg}" = "false" ] || [ "${plugin_cfg}" = "false" ]; then
+        enabled="false"
+    elif [ "${blur_cfg}" = "true" ] || [ "${plugin_cfg}" = "true" ]; then
+        enabled="true"
+    else
+        enabled="true"
+    fi
+
+    guard_reason="none"
+    guard_action="none"
+    if [ -f "${GUARD_STATUS_FILE}" ]; then
+        guard_reason="$(awk -F= '/^reason=/{print $2; exit}' "${GUARD_STATUS_FILE}" 2>/dev/null | tr -d '\r' || echo "none")"
+        guard_action="$(awk -F= '/^action=/{print $2; exit}' "${GUARD_STATUS_FILE}" 2>/dev/null | tr -d '\r' || echo "none")"
+    fi
+
+    if [ "${json_mode}" -eq 1 ]; then
+        if command -v python3 >/dev/null 2>&1; then
+            python3 - "${enabled}" "${mode}" "${BACKEND_NAME}" "${BACKEND_PLUGIN}" "${blur_cfg}" "${plugin_cfg}" "${translucency_cfg}" "${blur_strength}" "${noise_strength}" "${guard_action}" "${guard_reason}" "${KWINRC}" <<'PYEOF'
+import json
+import sys
+
+(
+    enabled,
+    mode,
+    backend,
+    plugin,
+    blur_cfg,
+    plugin_cfg,
+    translucency_cfg,
+    blur_strength,
+    noise_strength,
+    guard_action,
+    guard_reason,
+    kwinrc,
+) = sys.argv[1:13]
+
+def to_int(val, fallback):
+    try:
+        return int(val)
+    except ValueError:
+        return fallback
+
+payload = {
+    "enabled": enabled == "true",
+    "mode": mode,
+    "backend": backend,
+    "plugin": plugin if plugin else None,
+    "kwinrc": kwinrc,
+    "blur_enabled_config": blur_cfg,
+    "plugin_enabled_config": plugin_cfg if plugin else None,
+    "translucency_disabled": translucency_cfg == "false",
+    "blur_strength": to_int(blur_strength, 6),
+    "noise_strength": to_int(noise_strength, 2),
+    "guard": {
+        "action": guard_action or "none",
+        "reason": guard_reason or "none",
+    },
+}
+print(json.dumps(payload, indent=2))
+PYEOF
+        else
+            printf '{"enabled":%s,"mode":"%s","backend":"%s","plugin":%s,"translucency_disabled":%s,"blur_strength":%s,"noise_strength":%s}\n' \
+                "${enabled}" \
+                "${mode}" \
+                "${BACKEND_NAME}" \
+                "$([ -n "${BACKEND_PLUGIN}" ] && printf '"%s"' "${BACKEND_PLUGIN}" || printf 'null')" \
+                "$([ "${translucency_cfg}" = "false" ] && printf 'true' || printf 'false')" \
+                "${blur_strength}" \
+                "${noise_strength}"
+        fi
+    else
+        echo "=== Kushagra OS Liquid Glass Status ==="
+        echo "State:         $([ "${enabled}" = "true" ] && echo "ENABLED" || echo "DISABLED") (blurEnabled=${blur_cfg})"
+        echo "User Mode:     ${mode} (${MODE_FILE})"
+        echo "Backend:       ${BACKEND_NAME}$([ -n "${BACKEND_PLUGIN}" ] && echo " [plugin: ${BACKEND_PLUGIN}]" || true)"
+        echo "Blur Settings: BlurStrength=${blur_strength}, NoiseStrength=${noise_strength}"
+        echo "Translucency:  $([ "${translucency_cfg}" = "false" ] && echo "DISABLED (opaque text preserved)" || echo "${translucency_cfg}")"
+        if [ -f "${GUARD_STATUS_FILE}" ]; then
+            echo "Guard Status:  ${guard_action} (reason: ${guard_reason})"
+        fi
+    fi
+}
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-glass-toggle [on|off|auto|force-on|status] [--json] [--force] [--guard]
+
+Commands:
+  on        Enable Liquid Glass blur (sets BlurStrength=6, NoiseStrength=2, Translucency=off)
+  off       Disable Liquid Glass blur (performance / low-RAM safe mode)
+  auto      Evaluate hardware guard (disables on <= 4.5 GiB RAM or llvmpipe)
+  force-on  Enable Liquid Glass blur and override hardware guard
+  status    Show current Liquid Glass state (add --json for machine-readable output)
+EOF
+}
+
+load_backend_info
+
+ACTION=""
+JSON_OUTPUT=0
+FORCE_FLAG=0
+GUARD_FLAG=0
+
+for arg in "$@"; do
+    case "${arg}" in
+        on|off|auto|force-on|status)
+            if [ -n "${ACTION}" ]; then
+                echo "ERROR: Multiple actions specified ('${ACTION}' and '${arg}')." >&2
+                usage >&2
+                exit 1
+            fi
+            ACTION="${arg}"
+            ;;
+        --json) JSON_OUTPUT=1 ;;
+        --force) FORCE_FLAG=1 ;;
+        --guard) GUARD_FLAG=1 ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: Unknown argument '${arg}'." >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "${ACTION}" ]; then
+    ACTION="status"
+fi
+
+case "${ACTION}" in
+    on)
+        if [ "${FORCE_FLAG}" -eq 1 ]; then
+            write_mode_pref "force-on"
+        elif [ "${GUARD_FLAG}" -eq 1 ]; then
+            if [ ! -f "${MODE_FILE}" ]; then
+                write_mode_pref "auto"
+            fi
+        else
+            write_mode_pref "on"
+        fi
+        apply_glass_state "true"
+        if [ "${JSON_OUTPUT}" -eq 1 ]; then
+            print_status 1
+        elif [ "${GUARD_FLAG}" -eq 0 ]; then
+            echo "Kushagra Liquid Glass enabled (backend: ${BACKEND_NAME}, BlurStrength=6, NoiseStrength=2, Translucency=off)."
+        fi
+        ;;
+    force-on)
+        write_mode_pref "force-on"
+        apply_glass_state "true"
+        if [ "${JSON_OUTPUT}" -eq 1 ]; then
+            print_status 1
+        else
+            echo "Kushagra Liquid Glass force-enabled (hardware guard bypassed)."
+        fi
+        ;;
+    off)
+        if [ "${GUARD_FLAG}" -eq 1 ]; then
+            if [ ! -f "${MODE_FILE}" ]; then
+                write_mode_pref "auto"
+            fi
+        else
+            write_mode_pref "off"
+        fi
+        apply_glass_state "false"
+        if [ "${JSON_OUTPUT}" -eq 1 ]; then
+            print_status 1
+        elif [ "${GUARD_FLAG}" -eq 0 ]; then
+            echo "Kushagra Liquid Glass disabled (Translucency=off)."
+        fi
+        ;;
+    auto)
+        write_mode_pref "auto"
+        if [ "${KUSHAGRA_GUARD_ACTIVE:-0}" = "1" ]; then
+            apply_glass_state "true"
+        else
+            guard_bin="${KUSHAGRA_GLASS_GUARD_BIN:-$(dirname "$0")/kushagra-glass-guard}"
+            if [ ! -x "${guard_bin}" ]; then
+                guard_bin="/usr/bin/kushagra-glass-guard"
+            fi
+            if [ -x "${guard_bin}" ]; then
+                KUSHAGRA_GUARD_ACTIVE=1 "${guard_bin}" >/dev/null
+            else
+                apply_glass_state "true"
+            fi
+        fi
+        if [ "${JSON_OUTPUT}" -eq 1 ]; then
+            print_status 1
+        elif [ "${GUARD_FLAG}" -eq 0 ]; then
+            print_status 0
+        fi
+        ;;
+    status)
+        print_status "${JSON_OUTPUT}"
+        ;;
+esac

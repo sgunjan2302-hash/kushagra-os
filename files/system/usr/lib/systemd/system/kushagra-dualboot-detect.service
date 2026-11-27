@@ -1,0 +1,13 @@
+[Unit]
+Description=Kushagra OS Dual-Boot Windows Boot Manager Detector
+After=local-fs.target boot-efi.mount
+Before=display-manager.service graphical.target
+ConditionKernelCommandLine=!rd.live.image
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bash -euo pipefail -c 'MARKER=/run/kushagra-windows-boot-available; TARGET=/usr/bin/kushagra-reboot-windows; HAS_EFI_BIN=0; HAS_NVRAM=0; if [ -d /boot/efi/EFI ] && [ -n "$(find /boot/efi/EFI -maxdepth 4 -iname bootmgfw.efi -print -quit 2>/dev/null || true)" ]; then HAS_EFI_BIN=1; fi; if command -v efibootmgr >/dev/null 2>&1 && efibootmgr 2>/dev/null | grep -Eiq "^Boot[0-9A-Fa-f]{4}[*]?[[:space:]]+Windows[[:space:]]+Boot[[:space:]]+Manager([[:space:]]|$)"; then HAS_NVRAM=1; fi; if [ "$HAS_EFI_BIN" -eq 1 ] && [ "$HAS_NVRAM" -eq 1 ] && [ -x "$TARGET" ]; then ln -sfn "$TARGET" "$MARKER"; else rm -f "$MARKER"; fi'
+
+[Install]
+WantedBy=multi-user.target

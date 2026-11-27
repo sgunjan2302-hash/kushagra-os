@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=K-AI Assistant
+GenericName=Kushagra AI Side Drawer
+Comment=Privacy-first multilingual K-AI assistant drawer with explicit action confirmation
+Exec=/usr/bin/k-ai-drawer
+Icon=/usr/share/kushagra-os/branding/logo-symbol.svg
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=ai;assistant;hindi;ocr;kushagra;k-ai;
+NoDisplay=false
+StartupNotify=false

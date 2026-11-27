@@ -1,0 +1,1402 @@
+#!/usr/bin/env python3
+"""Kushagra OS K-AI Lazy On-Demand Inference Supervisor & Cloud Bridge.
+
+Listens on 127.0.0.1:11435 (with systemd socket activation support), keeps
+idle model RAM strictly at 0 MB on startup, launches llama-server lazily only
+when local inference is requested and a GGUF model is available, auto-unloads
+after 300s of inactivity, and fetches Cloud API keys dynamically from KWallet /
+Secret Service without ever writing secrets to plaintext files.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 11435
+DEFAULT_IDLE_TIMEOUT = 300
+MAX_REQUEST_BYTES = 4 * 1024 * 1024
+
+KWALLET_FOLDER = "Kushagra-K-AI"
+KWALLET_APP_ID = "k-ai-engine"
+SECRET_SERVICE_ATTR = "kushagra-k-ai"
+
+CLOUD_ENDPOINTS = {
+    "openai": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "default_model": "gpt-4o-mini",
+    },
+    "groq": {
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "default_model": "llama-3.3-70b-versatile",
+    },
+    "gemini": {
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "default_model": "gemini-2.5-flash",
+    },
+}
+
+
+def get_home_dir() -> str:
+    """Return user home directory while respecting HOME overrides in tests."""
+    env_home = os.environ.get("HOME")
+    if env_home:
+        return env_home
+    return os.path.expanduser("~")
+
+
+def get_models_dir() -> Path:
+    """Return directory containing downloaded GGUF models."""
+    override = os.environ.get("K_AI_MODELS_DIR")
+    if override:
+        return Path(override)
+    return Path(get_home_dir()) / ".local" / "share" / "k-ai" / "models"
+
+
+def get_config_path() -> Path:
+    """Return path to non-secret K-AI configuration JSON (never stores API keys)."""
+    return Path(get_home_dir()) / ".config" / "k-ai" / "config.json"
+
+
+def load_nonsecret_config() -> dict[str, Any]:
+    """Load non-secret provider metadata from ~/.config/k-ai/config.json."""
+    cfg_path = get_config_path()
+    default_cfg: dict[str, Any] = {
+        "cloud_provider": "openai",
+        "cloud_base_url": "",
+        "cloud_model": "",
+    }
+    if not cfg_path.is_file():
+        return default_cfg
+    try:
+        loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            for k in ("cloud_provider", "cloud_base_url", "cloud_model"):
+                if isinstance(loaded.get(k), str):
+                    default_cfg[k] = loaded[k]
+    except (OSError, json.JSONDecodeError):
+        pass
+    return default_cfg
+
+
+def save_nonsecret_config(cfg: dict[str, Any]) -> None:
+    """Persist strictly non-secret provider metadata to ~/.config/k-ai/config.json."""
+    cfg_path = get_config_path()
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(cfg_path.parent, 0o700)
+    except OSError:
+        pass
+    safe_cfg = {
+        "cloud_provider": str(cfg.get("cloud_provider", "openai")),
+        "cloud_base_url": str(cfg.get("cloud_base_url", "")),
+        "cloud_model": str(cfg.get("cloud_model", "")),
+    }
+    fd = os.open(str(cfg_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (json.dumps(safe_cfg, indent=2) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def load_detect_module() -> Any | None:
+    """Load sibling or installed k-ai-detect Python module."""
+    candidates = [
+        Path(__file__).resolve().with_name("k-ai-detect"),
+        Path("/usr/bin/k-ai-detect"),
+    ]
+    which_path = shutil.which("k-ai-detect")
+    if which_path:
+        candidates.insert(0, Path(which_path))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            loader = importlib.machinery.SourceFileLoader("k_ai_detect", str(candidate))
+            spec = importlib.util.spec_from_loader("k_ai_detect", loader)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+    return None
+
+
+def get_hardware_profile() -> dict[str, Any]:
+    """Retrieve hardware tier classification via k-ai-detect."""
+    mod = load_detect_module()
+    if mod is not None and hasattr(mod, "detect_hardware"):
+        try:
+            return mod.detect_hardware()
+        except Exception:
+            pass
+
+    detect_bin = shutil.which("k-ai-detect") or "/usr/bin/k-ai-detect"
+    if os.path.isfile(detect_bin):
+        try:
+            proc = subprocess.run(
+                [sys.executable, detect_bin, "--json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                parsed = json.loads(proc.stdout)
+                if isinstance(parsed, dict):
+                    return parsed
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            pass
+
+    return {
+        "ram_gib": 0.0,
+        "vram_gib": 0.0,
+        "tier": 1,
+        "tier_name": "cloud_only",
+        "recommended_model": None,
+        "local_enabled": False,
+        "ctx_size": 0,
+        "hybrid_offload": False,
+        "gpu_layers": 0,
+        "vulkan_available": False,
+        "gpu_backend": "none",
+        "gpus": [],
+        "models_dir": str(get_models_dir()),
+        "message": "Fallback Tier 1 profile.",
+    }
+
+
+def _kwallet_entry_name(provider: str) -> str:
+    clean = re.sub(r"[^a-zA-Z0-9_-]", "_", provider.lower())
+    return f"cloud_api_key_{clean}"
+
+
+class KeyringBackendError(RuntimeError):
+    """Raised when no secure keyring (KWallet / Secret Service) is usable."""
+
+
+class KeyringStore:
+    """Secure secret storage backed by KWallet DBus, kwallet-query, or secret-tool."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def _qt_dbus_op(self, op: str, entry: str, value: str | None = None) -> tuple[bool, str | None]:
+        try:
+            from PyQt6.QtCore import QCoreApplication
+            from PyQt6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
+        except Exception:
+            return False, None
+
+        app = QCoreApplication.instance()
+        if app is None:
+            if threading.current_thread() is not threading.main_thread():
+                return False, None
+            app = QCoreApplication([KWALLET_APP_ID])
+
+        bus = QDBusConnection.sessionBus()
+        if not bus.isConnected():
+            return False, None
+
+        iface = None
+        for svc, path in (
+            ("org.kde.kwalletd6", "/modules/kwalletd6"),
+            ("org.kde.kwalletd5", "/modules/kwalletd5"),
+        ):
+            candidate = QDBusInterface(svc, path, "org.kde.KWallet", bus)
+            if candidate.isValid():
+                iface = candidate
+                break
+
+        if iface is None:
+            return False, None
+
+        net_reply = iface.call("networkWallet")
+        if net_reply.type() == QDBusMessage.MessageType.ErrorMessage or not net_reply.arguments():
+            wallet_name = "kdewallet"
+        else:
+            wallet_name = str(net_reply.arguments()[0] or "kdewallet")
+
+        open_reply = iface.call("open", wallet_name, 0, KWALLET_APP_ID)
+        if open_reply.type() == QDBusMessage.MessageType.ErrorMessage or not open_reply.arguments():
+            return False, None
+
+        handle = int(open_reply.arguments()[0])
+        if handle < 0:
+            return False, None
+
+        try:
+            if op == "get":
+                has_reply = iface.call("hasEntry", handle, KWALLET_FOLDER, entry, KWALLET_APP_ID)
+                if has_reply.type() == QDBusMessage.MessageType.ErrorMessage or not has_reply.arguments():
+                    return True, None
+                if not bool(has_reply.arguments()[0]):
+                    return True, None
+                read_reply = iface.call("readPassword", handle, KWALLET_FOLDER, entry, KWALLET_APP_ID)
+                if read_reply.type() == QDBusMessage.MessageType.ErrorMessage or not read_reply.arguments():
+                    return True, None
+                secret = str(read_reply.arguments()[0] or "")
+                return True, (secret if secret else None)
+            if op == "set":
+                write_reply = iface.call(
+                    "writePassword", handle, KWALLET_FOLDER, entry, value or "", KWALLET_APP_ID
+                )
+                ok = (
+                    write_reply.type() != QDBusMessage.MessageType.ErrorMessage
+                    and bool(write_reply.arguments())
+                    and int(write_reply.arguments()[0]) == 0
+                )
+                return ok, None
+            if op == "clear":
+                has_reply = iface.call("hasEntry", handle, KWALLET_FOLDER, entry, KWALLET_APP_ID)
+                if (
+                    has_reply.type() != QDBusMessage.MessageType.ErrorMessage
+                    and has_reply.arguments()
+                    and not bool(has_reply.arguments()[0])
+                ):
+                    return True, None
+                rem_reply = iface.call("removeEntry", handle, KWALLET_FOLDER, entry, KWALLET_APP_ID)
+                ok = (
+                    rem_reply.type() != QDBusMessage.MessageType.ErrorMessage
+                    and bool(rem_reply.arguments())
+                    and int(rem_reply.arguments()[0]) == 0
+                )
+                return ok, None
+        finally:
+            iface.call("close", handle, False, KWALLET_APP_ID)
+
+        return False, None
+
+    def _kwallet_query_get(self, entry: str) -> tuple[bool, str | None]:
+        kq = shutil.which("kwallet-query")
+        if not kq:
+            return False, None
+        try:
+            proc = subprocess.run(
+                [kq, "kdewallet", "-f", KWALLET_FOLDER, "-r", entry],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False, None
+        if proc.returncode != 0:
+            return False, None
+        secret = proc.stdout.rstrip("\r\n")
+        return True, (secret if secret else None)
+
+    def _kwallet_query_set(self, entry: str, value: str) -> bool:
+        kq = shutil.which("kwallet-query")
+        if not kq:
+            return False
+        try:
+            proc = subprocess.run(
+                [kq, "kdewallet", "-f", KWALLET_FOLDER, "-w", entry],
+                input=value + "\n",
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return proc.returncode == 0
+
+    def _secret_tool_get(self, provider: str) -> tuple[bool, str | None]:
+        st = shutil.which("secret-tool")
+        if not st:
+            return False, None
+        try:
+            proc = subprocess.run(
+                [st, "lookup", "service", SECRET_SERVICE_ATTR, "account", provider],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False, None
+        if proc.returncode != 0:
+            return False, None
+        secret = proc.stdout.rstrip("\r\n")
+        return True, (secret if secret else None)
+
+    def _secret_tool_set(self, provider: str, value: str) -> bool:
+        st = shutil.which("secret-tool")
+        if not st:
+            return False
+        try:
+            proc = subprocess.run(
+                [
+                    st,
+                    "store",
+                    "--label=Kushagra K-AI Cloud API Key",
+                    "service",
+                    SECRET_SERVICE_ATTR,
+                    "account",
+                    provider,
+                ],
+                input=value,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return proc.returncode == 0
+
+    def _secret_tool_clear(self, provider: str) -> bool:
+        st = shutil.which("secret-tool")
+        if not st:
+            return False
+        try:
+            proc = subprocess.run(
+                [st, "clear", "service", SECRET_SERVICE_ATTR, "account", provider],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return proc.returncode == 0
+
+    def get_key(self, provider: str) -> str | None:
+        entry = _kwallet_entry_name(provider)
+        with self._lock:
+            ok, secret = self._qt_dbus_op("get", entry)
+            if ok and secret:
+                return secret
+            ok_kq, secret_kq = self._kwallet_query_get(entry)
+            if ok_kq and secret_kq:
+                return secret_kq
+            ok_st, secret_st = self._secret_tool_get(provider)
+            if ok_st and secret_st:
+                return secret_st
+            if (
+                threading.current_thread() is not threading.main_thread()
+                and Path(__file__).is_file()
+                and importlib.util.find_spec("PyQt6.QtDBus") is not None
+            ):
+                try:
+                    proc = subprocess.run(
+                        [sys.executable, str(Path(__file__).resolve()), "get-key", "--provider", provider, "--raw"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    if proc.returncode == 0 and proc.stdout.strip():
+                        return proc.stdout.strip()
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        return None
+
+    def set_key(self, provider: str, secret: str) -> str:
+        if not secret or not secret.strip():
+            raise KeyringBackendError("API key must not be empty.")
+        entry = _kwallet_entry_name(provider)
+        cleaned = secret.strip()
+        with self._lock:
+            ok, _ = self._qt_dbus_op("set", entry, cleaned)
+            if ok:
+                return "kwallet-dbus"
+            if self._kwallet_query_set(entry, cleaned):
+                return "kwallet-query"
+            if self._secret_tool_set(provider, cleaned):
+                return "secret-tool"
+        raise KeyringBackendError(
+            "No active KWallet (org.kde.kwalletd6 / kwallet-query) or Secret Service "
+            "(secret-tool) backend available. Refusing plaintext disk storage."
+        )
+
+    def clear_key(self, provider: str) -> bool:
+        entry = _kwallet_entry_name(provider)
+        cleared = False
+        with self._lock:
+            ok, _ = self._qt_dbus_op("clear", entry)
+            if ok:
+                cleared = True
+            if self._secret_tool_clear(provider):
+                cleared = True
+            if not cleared and shutil.which("kwallet-query"):
+                ok_kq, existing = self._kwallet_query_get(entry)
+                if ok_kq and existing:
+                    cleared = self._kwallet_query_set(entry, "")
+        return cleared
+
+
+def mask_secret(secret: str) -> str:
+    """Return non-sensitive masked display string for an API key."""
+    if len(secret) <= 8:
+        return "*" * len(secret)
+    return f"{secret[:4]}...{secret[-4:]}"
+
+
+def discover_llama_server() -> str | None:
+    """Locate llama-server executable cleanly without hardcoding a single path."""
+    found = shutil.which("llama-server")
+    if found:
+        return found
+    for candidate in ("/usr/bin/llama-server", "/usr/local/bin/llama-server"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def probe_llama_caps(binary: str, profile: dict[str, Any]) -> dict[str, Any]:
+    """Probe llama-server --help and --list-devices at runtime."""
+    caps: dict[str, Any] = {
+        "model_flag": "-m",
+        "ctx_flag": "-c",
+        "ngl_flag": None,
+        "threads_flag": "-t",
+        "supports_host": True,
+        "supports_port": True,
+        "vulkan_runtime_detected": bool(profile.get("vulkan_available", False)),
+    }
+    try:
+        proc = subprocess.run(
+            [binary, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        help_txt = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    except (OSError, subprocess.SubprocessError):
+        help_txt = ""
+
+    if help_txt:
+        caps["model_flag"] = "--model" if "--model" in help_txt else "-m"
+        caps["ctx_flag"] = "--ctx-size" if "--ctx-size" in help_txt else ("-c" if "-c" in help_txt else None)
+        if "--n-gpu-layers" in help_txt:
+            caps["ngl_flag"] = "--n-gpu-layers"
+        elif "-ngl" in help_txt:
+            caps["ngl_flag"] = "-ngl"
+        caps["threads_flag"] = "--threads" if "--threads" in help_txt else ("-t" if "-t" in help_txt else None)
+        caps["supports_host"] = "--host" in help_txt
+        caps["supports_port"] = "--port" in help_txt
+
+        if "--list-devices" in help_txt:
+            try:
+                dev_proc = subprocess.run(
+                    [binary, "--list-devices"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                dev_txt = ((dev_proc.stdout or "") + "\n" + (dev_proc.stderr or "")).lower()
+                if dev_proc.returncode == 0 and dev_txt.strip():
+                    caps["vulkan_runtime_detected"] = "vulkan" in dev_txt
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+    return caps
+
+
+def build_llama_command(
+    binary: str,
+    caps: dict[str, Any],
+    model_path: Path,
+    port: int,
+    profile: dict[str, Any],
+) -> list[str]:
+    """Build llama-server argv from runtime-probed capabilities and hardware tier."""
+    cmd: list[str] = [binary, caps["model_flag"], str(model_path)]
+    if caps.get("supports_host", True):
+        cmd.extend(["--host", DEFAULT_HOST])
+    if caps.get("supports_port", True):
+        cmd.extend(["--port", str(port)])
+
+    ctx_size = int(profile.get("ctx_size") or 0)
+    if ctx_size > 0 and caps.get("ctx_flag"):
+        cmd.extend([str(caps["ctx_flag"]), str(ctx_size)])
+
+    gpu_layers = int(profile.get("gpu_layers") or 0)
+    ngl_flag = caps.get("ngl_flag")
+    if ngl_flag:
+        if gpu_layers > 0 and caps.get("vulkan_runtime_detected"):
+            cmd.extend([str(ngl_flag), str(gpu_layers)])
+        else:
+            cmd.extend([str(ngl_flag), "0"])
+
+    threads_flag = caps.get("threads_flag")
+    if threads_flag:
+        threads = max(1, min(os.cpu_count() or 4, 8))
+        cmd.extend([str(threads_flag), str(threads)])
+
+    return cmd
+
+
+def find_free_loopback_port() -> int:
+    """Allocate a free ephemeral port bound strictly to 127.0.0.1."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((DEFAULT_HOST, 0))
+        return int(s.getsockname()[1])
+
+
+def read_proc_rss_mb(pid: int) -> float:
+    """Read process VmRSS from /proc/<pid>/status in MiB."""
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        text = status_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0.0
+    match = re.search(r"^VmRSS:\s+(\d+)\s+kB", text, re.MULTILINE)
+    if not match:
+        return 0.0
+    return round(int(match.group(1)) / 1024.0, 2)
+
+
+def list_local_gguf_models(models_dir: Path | None = None) -> list[Path]:
+    """List valid .gguf model files in ~/.local/share/k-ai/models."""
+    base = models_dir if models_dir is not None else get_models_dir()
+    if not base.is_dir():
+        return []
+    base_real = os.path.realpath(base)
+    results: list[Path] = []
+    for item in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+        if not item.name.lower().endswith(".gguf") or not item.is_file():
+            continue
+        item_real = os.path.realpath(item)
+        try:
+            if os.path.commonpath([base_real, item_real]) == base_real:
+                results.append(item)
+        except ValueError:
+            continue
+    return results
+
+
+def select_local_model(requested_model: str | None, profile: dict[str, Any]) -> Path | None:
+    """Select an existing GGUF model inside models_dir without path traversal."""
+    models = list_local_gguf_models()
+    if not models:
+        return None
+
+    if requested_model and "/" not in requested_model and "\\" not in requested_model and ".." not in requested_model:
+        req_lower = requested_model.lower()
+        for m in models:
+            if m.name.lower() == req_lower or m.stem.lower() == req_lower:
+                return m
+
+    rec = profile.get("recommended_model")
+    if isinstance(rec, str) and rec:
+        for m in models:
+            if m.name.lower() == rec.lower():
+                return m
+
+    return models[0]
+
+
+class EngineState:
+    """Thread-safe lazy llama-server supervisor and cloud proxy state."""
+
+    def __init__(self, idle_timeout: int = DEFAULT_IDLE_TIMEOUT, socket_activated: bool = False) -> None:
+        self.lock = threading.RLock()
+        self.idle_timeout = max(1, int(idle_timeout))
+        self.socket_activated = socket_activated
+        self.keyring = KeyringStore()
+
+        self.llama_proc: subprocess.Popen[bytes] | None = None
+        self.llama_port: int | None = None
+        self.loaded_model: str | None = None
+        self.loaded_backend: str = "idle"
+        self.last_inference_activity: float | None = None
+        self.last_http_activity: float = time.monotonic()
+
+    def touch_http(self) -> None:
+        with self.lock:
+            self.last_http_activity = time.monotonic()
+
+    def _is_llama_alive_locked(self) -> bool:
+        if self.llama_proc is None:
+            return False
+        if self.llama_proc.poll() is not None:
+            self.llama_proc = None
+            self.llama_port = None
+            self.loaded_model = None
+            self.loaded_backend = "idle"
+            self.last_inference_activity = None
+            return False
+        return True
+
+    def unload_model(self) -> bool:
+        """Terminate llama-server cleanly to guarantee 0 MB model RAM."""
+        with self.lock:
+            proc = self.llama_proc
+            was_running = self._is_llama_alive_locked()
+            self.llama_proc = None
+            self.llama_port = None
+            self.loaded_model = None
+            self.loaded_backend = "idle"
+            self.last_inference_activity = None
+
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            except OSError:
+                pass
+        return was_running
+
+    def _ensure_llama_running(self, model_path: Path, profile: dict[str, Any]) -> int:
+        with self.lock:
+            if self._is_llama_alive_locked() and self.loaded_model == model_path.name and self.llama_port:
+                self.last_inference_activity = time.monotonic()
+                return self.llama_port
+
+        self.unload_model()
+
+        binary = discover_llama_server()
+        if not binary:
+            raise RuntimeError(
+                "llama-server binary not found. Ensure the 'llama-cpp' package is installed."
+            )
+
+        caps = probe_llama_caps(binary, profile)
+        port = find_free_loopback_port()
+        cmd = build_llama_command(binary, caps, model_path, port, profile)
+
+        child_env = os.environ.copy()
+        for var in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):
+            child_env.pop(var, None)
+
+        cache_dir = Path(get_home_dir()) / ".cache" / "k-ai"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(cache_dir, 0o700)
+        except OSError:
+            pass
+        log_path = cache_dir / "llama-server.log"
+        err_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        err_file = os.fdopen(err_fd, "wb")
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=err_file,
+                env=child_env,
+                start_new_session=True,
+            )
+        finally:
+            err_file.close()
+
+        deadline = time.monotonic() + 60.0
+        ready = False
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                try:
+                    err_out = log_path.read_text(encoding="utf-8", errors="replace")[-512:]
+                except OSError:
+                    err_out = ""
+                raise RuntimeError(
+                    f"llama-server exited prematurely (code {proc.returncode}): {err_out.strip()}"
+                )
+            try:
+                req = urllib.request.Request(f"http://{DEFAULT_HOST}:{port}/health", method="GET")
+                with urllib.request.urlopen(req, timeout=1.0) as resp:
+                    if 200 <= resp.status < 300:
+                        ready = True
+                        break
+            except Exception:
+                time.sleep(0.25)
+
+        if not ready:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+            raise RuntimeError("Timed out waiting for llama-server /health readiness.")
+
+        use_vulkan = bool(profile.get("gpu_layers", 0) > 0 and caps.get("vulkan_runtime_detected"))
+        backend_label = "llama.cpp-vulkan" if use_vulkan else "llama.cpp-cpu"
+
+        with self.lock:
+            self.llama_proc = proc
+            self.llama_port = port
+            self.loaded_model = model_path.name
+            self.loaded_backend = backend_label
+            self.last_inference_activity = time.monotonic()
+        return port
+
+    def get_status(self) -> dict[str, Any]:
+        """Return live hardware tier, model load state, RSS MB, and idle timer."""
+        profile = get_hardware_profile()
+        models = [p.name for p in list_local_gguf_models()]
+        cfg = load_nonsecret_config()
+        provider = cfg.get("cloud_provider", "openai")
+        cloud_key_present = False
+        try:
+            cloud_key_present = bool(self.keyring.get_key(provider))
+        except Exception:
+            cloud_key_present = False
+
+        with self.lock:
+            alive = self._is_llama_alive_locked()
+            pid = self.llama_proc.pid if alive and self.llama_proc else None
+            rss_mb = read_proc_rss_mb(pid) if pid else 0.0
+            if alive and self.last_inference_activity is not None:
+                elapsed = time.monotonic() - self.last_inference_activity
+                remaining = max(0, int(round(self.idle_timeout - elapsed)))
+                backend = self.loaded_backend
+            else:
+                remaining = 0
+                backend = f"cloud:{provider}" if (not profile.get("local_enabled") and cloud_key_present) else "idle"
+
+            return {
+                "status": "ok",
+                "tier": profile.get("tier", 1),
+                "tier_name": profile.get("tier_name", "cloud_only"),
+                "ram_gib": profile.get("ram_gib", 0.0),
+                "vram_gib": profile.get("vram_gib", 0.0),
+                "local_enabled": bool(profile.get("local_enabled", False)),
+                "recommended_model": profile.get("recommended_model"),
+                "available_models": models,
+                "model_loaded": alive,
+                "loaded_model": self.loaded_model if alive else None,
+                "llama_pid": pid,
+                "rss_mb": rss_mb,
+                "idle_timeout_seconds": self.idle_timeout,
+                "idle_seconds_remaining": remaining,
+                "backend": backend,
+                "cloud_configured": cloud_key_present,
+                "cloud_provider": provider if cloud_key_present else None,
+                "socket_activated": self.socket_activated,
+            }
+
+    def check_idle_expiration(self) -> tuple[bool, bool]:
+        """Check whether llama-server or socket-activated supervisor exceeded idle timeout.
+
+        Returns (unloaded_model, should_shutdown_supervisor).
+        """
+        now = time.monotonic()
+        need_unload = False
+        need_shutdown = False
+        with self.lock:
+            if self._is_llama_alive_locked():
+                if self.last_inference_activity is not None and (now - self.last_inference_activity) >= self.idle_timeout:
+                    need_unload = True
+                    if self.socket_activated:
+                        need_shutdown = True
+            elif self.socket_activated and (now - self.last_http_activity) >= self.idle_timeout:
+                need_shutdown = True
+
+        if need_unload:
+            self.unload_model()
+        return need_unload, need_shutdown
+
+    def _forward_http_json(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        stream: bool = False,
+        timeout: int = 180,
+    ) -> tuple[int, dict[str, str], bytes | Any]:
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            if stream:
+                return resp.status, dict(resp.headers.items()), resp
+            raw = resp.read()
+            resp_headers = dict(resp.headers.items())
+            resp.close()
+            return resp.status, resp_headers, raw
+        except urllib.error.HTTPError as exc:
+            raw_err = exc.read()
+            return exc.code, {"Content-Type": "application/json"}, raw_err
+
+    def handle_chat_completions(self, payload: dict[str, Any]) -> tuple[int, dict[str, str], bytes | Any]:
+        """Route OpenAI-compatible chat completion to lazy local llama-server or Cloud API."""
+        self.touch_http()
+        if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list) or not payload["messages"]:
+            err = {"error": {"message": "'messages' must be a non-empty list.", "type": "invalid_request_error"}}
+            return 400, {"Content-Type": "application/json"}, json.dumps(err).encode("utf-8")
+
+        profile = get_hardware_profile()
+        requested_provider = str(payload.get("provider", "auto")).lower()
+        requested_model = payload.get("model")
+        stream = bool(payload.get("stream", False))
+
+        cfg = load_nonsecret_config()
+        active_cloud_provider = str(cfg.get("cloud_provider", "openai")).lower()
+
+        if isinstance(requested_model, str):
+            for p_prefix in ("openai:", "groq:", "gemini:", "custom:", "cloud:"):
+                if requested_model.lower().startswith(p_prefix):
+                    requested_provider = "cloud"
+                    prefix_name = p_prefix[:-1]
+                    if prefix_name != "cloud":
+                        active_cloud_provider = prefix_name
+                    requested_model = requested_model[len(p_prefix):] or None
+                    break
+
+        use_local = False
+        if requested_provider == "local":
+            if not profile.get("local_enabled"):
+                err = {
+                    "error": {
+                        "message": (
+                            "Local inference is disabled on Tier 1 (<= 6.5 GiB RAM) to protect "
+                            "system stability. Configure a Cloud API key via 'k-ai-engine set-key'."
+                        ),
+                        "type": "tier_restriction",
+                    }
+                }
+                return 400, {"Content-Type": "application/json"}, json.dumps(err).encode("utf-8")
+            use_local = True
+        elif requested_provider == "cloud":
+            use_local = False
+        else:
+            models = list_local_gguf_models()
+            if profile.get("local_enabled") and models and discover_llama_server():
+                use_local = True
+
+        if use_local:
+            model_path = select_local_model(requested_model if isinstance(requested_model, str) else None, profile)
+            if model_path is None:
+                err = {
+                    "error": {
+                        "message": (
+                            f"No GGUF model found in {get_models_dir()}. Download "
+                            f"{profile.get('recommended_model') or 'a GGUF model'} there or use Cloud API."
+                        ),
+                        "type": "model_not_found",
+                    }
+                }
+                return 404, {"Content-Type": "application/json"}, json.dumps(err).encode("utf-8")
+
+            port = self._ensure_llama_running(model_path, profile)
+            fwd_payload = {k: v for k, v in payload.items() if k != "provider"}
+            fwd_payload["model"] = model_path.name
+            with self.lock:
+                self.last_inference_activity = time.monotonic()
+            status, hdrs, body = self._forward_http_json(
+                f"http://{DEFAULT_HOST}:{port}/v1/chat/completions",
+                fwd_payload,
+                {"Content-Type": "application/json"},
+                stream=stream,
+                timeout=300,
+            )
+            with self.lock:
+                self.last_inference_activity = time.monotonic()
+            return status, hdrs, body
+
+        api_key = self.keyring.get_key(active_cloud_provider)
+        if not api_key:
+            hint = (
+                f"Place a GGUF model in {get_models_dir()} or configure a Cloud API key with 'k-ai-engine set-key'."
+                if profile.get("local_enabled")
+                else "Tier 1 (cloud_only) requires a Cloud API key. Configure one with 'k-ai-engine set-key'."
+            )
+            err = {"error": {"message": hint, "type": "configuration_required"}}
+            return 503, {"Content-Type": "application/json"}, json.dumps(err).encode("utf-8")
+
+        if active_cloud_provider == "custom":
+            base_url = str(cfg.get("cloud_base_url", "")).strip()
+            parsed = urlparse(base_url)
+            if parsed.scheme != "https" or not parsed.netloc:
+                err = {
+                    "error": {
+                        "message": "Custom cloud provider requires an https:// base URL.",
+                        "type": "configuration_required",
+                    }
+                }
+                return 400, {"Content-Type": "application/json"}, json.dumps(err).encode("utf-8")
+            target_url = base_url.rstrip("/")
+            if not target_url.endswith("/chat/completions"):
+                target_url = f"{target_url}/chat/completions"
+            default_model = cfg.get("cloud_model") or "gpt-4o-mini"
+        elif active_cloud_provider in CLOUD_ENDPOINTS:
+            target_url = CLOUD_ENDPOINTS[active_cloud_provider]["url"]
+            default_model = cfg.get("cloud_model") or CLOUD_ENDPOINTS[active_cloud_provider]["default_model"]
+        else:
+            err = {
+                "error": {
+                    "message": f"Unsupported cloud provider '{active_cloud_provider}'.",
+                    "type": "invalid_request_error",
+                }
+            }
+            return 400, {"Content-Type": "application/json"}, json.dumps(err).encode("utf-8")
+
+        fwd_payload = {k: v for k, v in payload.items() if k != "provider"}
+        if not fwd_payload.get("model") or str(fwd_payload.get("model")).endswith(".gguf"):
+            fwd_payload["model"] = default_model
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        return self._forward_http_json(target_url, fwd_payload, headers, stream=stream, timeout=120)
+
+
+class KaiHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    engine_state: EngineState
+
+
+class KaiRequestHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+    def _send_json(self, code: int, data: dict[str, Any]) -> None:
+        raw = json.dumps(data).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self) -> None:
+        state: EngineState = self.server.engine_state  # type: ignore[attr-defined]
+        state.touch_http()
+        path = urlparse(self.path).path
+
+        if path == "/health":
+            with state.lock:
+                loaded = state._is_llama_alive_locked()
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "service": "k-ai-engine",
+                    "socket_activated": state.socket_activated,
+                    "model_loaded": loaded,
+                },
+            )
+            return
+
+        if path == "/v1/status":
+            self._send_json(200, state.get_status())
+            return
+
+        self._send_json(404, {"error": {"message": f"Unknown GET endpoint: {path}"}})
+
+    def do_POST(self) -> None:
+        state: EngineState = self.server.engine_state  # type: ignore[attr-defined]
+        state.touch_http()
+        path = urlparse(self.path).path
+
+        if path == "/v1/unload":
+            unloaded = state.unload_model()
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "unloaded": unloaded,
+                    "model_loaded": False,
+                    "rss_mb": 0.0,
+                },
+            )
+            return
+
+        if path == "/v1/chat/completions":
+            try:
+                content_len = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_json(400, {"error": {"message": "Invalid Content-Length header."}})
+                return
+
+            if content_len <= 0 or content_len > MAX_REQUEST_BYTES:
+                self._send_json(
+                    413 if content_len > MAX_REQUEST_BYTES else 400,
+                    {"error": {"message": "Request body empty or exceeds 4 MiB limit."}},
+                )
+                return
+
+            raw_body = self.rfile.read(content_len)
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self._send_json(400, {"error": {"message": f"Invalid JSON body: {exc}"}})
+                return
+
+            try:
+                status, hdrs, body = state.handle_chat_completions(payload)
+            except Exception as exc:
+                self._send_json(502, {"error": {"message": f"Inference backend error: {exc}"}})
+                return
+
+            if hasattr(body, "read"):
+                self.send_response(status)
+                self.send_header("Content-Type", hdrs.get("Content-Type", "text/event-stream"))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    while True:
+                        chunk = body.read(4096)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                finally:
+                    body.close()
+                return
+
+            raw_bytes = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", hdrs.get("Content-Type", "application/json"))
+            self.send_header("Content-Length", str(len(raw_bytes)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(raw_bytes)
+            return
+
+        self._send_json(404, {"error": {"message": f"Unknown POST endpoint: {path}"}})
+
+
+def build_http_server(
+    host: str,
+    port: int,
+    state: EngineState,
+) -> tuple[KaiHTTPServer, bool]:
+    """Create ThreadingHTTPServer, adopting systemd LISTEN_FDS=1 socket when present."""
+    listen_pid = os.environ.get("LISTEN_PID")
+    listen_fds = os.environ.get("LISTEN_FDS")
+    socket_activated = False
+    if listen_pid and listen_fds:
+        try:
+            if int(listen_pid) == os.getpid() and int(listen_fds) >= 1:
+                socket_activated = True
+        except ValueError:
+            socket_activated = False
+
+    state.socket_activated = bool(state.socket_activated or socket_activated)
+    if socket_activated:
+        server = KaiHTTPServer((host, port), KaiRequestHandler, bind_and_activate=False)
+        server.socket.close()
+        adopted = socket.socket(fileno=3)
+        adopted.setblocking(True)
+        server.socket = adopted
+        server.server_address = adopted.getsockname()
+    else:
+        server = KaiHTTPServer((host, port), KaiRequestHandler, bind_and_activate=True)
+
+    server.engine_state = state
+    return server, socket_activated
+
+
+def run_watchdog(
+    server: KaiHTTPServer,
+    state: EngineState,
+    stop_event: threading.Event,
+    poll_seconds: float = 1.0,
+) -> None:
+    """Background watchdog terminating llama-server after 300s idle and exiting cleanly."""
+    while not stop_event.wait(timeout=poll_seconds):
+        _, should_shutdown = state.check_idle_expiration()
+        if should_shutdown:
+            stop_event.set()
+            break
+
+    state.unload_model()
+    try:
+        server.shutdown()
+    except Exception:
+        pass
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    idle_timeout = int(os.environ.get("K_AI_IDLE_TIMEOUT", str(args.idle_timeout)))
+    state = EngineState(idle_timeout=idle_timeout)
+    server, socket_activated = build_http_server(args.host, args.port, state)
+    stop_event = threading.Event()
+
+    def _on_signal(_signum: int, _frame: Any) -> None:
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    poll = min(1.0, max(0.1, idle_timeout / 4.0))
+    watchdog = threading.Thread(
+        target=run_watchdog,
+        args=(server, state, stop_event, poll),
+        daemon=True,
+    )
+    watchdog.start()
+
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        stop_event.set()
+        state.unload_model()
+        watchdog.join(timeout=3.0)
+        server.server_close()
+    return 0
+
+
+def _local_request(method: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 5.0) -> dict[str, Any]:
+    port = int(os.environ.get("K_AI_PORT", str(DEFAULT_PORT)))
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"} if payload is not None else {}
+    req = urllib.request.Request(
+        f"http://{DEFAULT_HOST}:{port}{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    try:
+        info = _local_request("GET", "/v1/status", timeout=2.0)
+        info["supervisor_running"] = True
+    except Exception:
+        info = EngineState().get_status()
+        info["supervisor_running"] = False
+
+    if args.json:
+        print(json.dumps(info, indent=2))
+    else:
+        print("=== Kushagra OS K-AI Engine Status ===")
+        print(f"Supervisor      : {'running (127.0.0.1:11435)' if info.get('supervisor_running') else 'idle/stopped (0 MB RAM)'}")
+        print(f"Hardware Tier   : Tier {info['tier']} ({info['tier_name']})")
+        print(f"Model Loaded    : {info['model_loaded']} ({info['loaded_model'] or 'none'})")
+        print(f"Model RSS RAM   : {info['rss_mb']} MB")
+        print(f"Idle Remaining  : {info['idle_seconds_remaining']}s / {info['idle_timeout_seconds']}s")
+        print(f"Active Backend  : {info['backend']}")
+        print(f"Cloud Key Ready : {info['cloud_configured']} ({info['cloud_provider'] or 'unset'})")
+    return 0
+
+
+def cmd_unload(_args: argparse.Namespace) -> int:
+    try:
+        res = _local_request("POST", "/v1/unload", payload={}, timeout=5.0)
+        print(json.dumps(res, indent=2))
+    except urllib.error.URLError:
+        print(json.dumps({"status": "ok", "unloaded": False, "model_loaded": False, "rss_mb": 0.0}, indent=2))
+    return 0
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    prompt_text = args.prompt or " ".join(args.text).strip()
+    if not prompt_text and not sys.stdin.isatty():
+        prompt_text = sys.stdin.read().strip()
+    if not prompt_text:
+        print("ERROR: Provide a prompt via --prompt, positional text, or stdin.", file=sys.stderr)
+        return 1
+
+    messages: list[dict[str, str]] = []
+    if args.system:
+        messages.append({"role": "system", "content": args.system})
+    messages.append({"role": "user", "content": prompt_text})
+
+    payload: dict[str, Any] = {
+        "messages": messages,
+        "provider": args.provider,
+    }
+    if args.model:
+        payload["model"] = args.model
+
+    try:
+        res = _local_request("POST", "/v1/chat/completions", payload=payload, timeout=180.0)
+    except urllib.error.HTTPError as exc:
+        err_txt = exc.read().decode("utf-8", errors="replace")
+        print(err_txt, file=sys.stderr)
+        return 1
+    except Exception:
+        # Direct in-process fallback when supervisor socket is not running
+        state = EngineState()
+        try:
+            code, _hdrs, body = state.handle_chat_completions(payload)
+            res = json.loads(body.decode("utf-8"))
+            if code >= 400:
+                print(json.dumps(res, indent=2), file=sys.stderr)
+                return 1
+        finally:
+            state.unload_model()
+
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        choices = res.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            content = choices[0].get("message", {}).get("content", "")
+            print(content)
+        else:
+            print(json.dumps(res, indent=2))
+    return 0
+
+
+def cmd_set_key(args: argparse.Namespace) -> int:
+    cfg = load_nonsecret_config()
+    provider = (args.provider or cfg.get("cloud_provider") or "openai").lower()
+    if provider not in (*CLOUD_ENDPOINTS.keys(), "custom"):
+        print(f"ERROR: Unsupported provider '{provider}'. Choose openai, groq, gemini, or custom.", file=sys.stderr)
+        return 1
+
+    secret = args.key or os.environ.get("K_AI_API_KEY")
+    if not secret:
+        if not sys.stdin.isatty():
+            secret = sys.stdin.read().strip()
+        else:
+            secret = getpass.getpass(f"Enter {provider} API key (stored securely in KWallet): ")
+
+    if not secret or not secret.strip():
+        print("ERROR: Empty API key rejected.", file=sys.stderr)
+        return 1
+
+    store = KeyringStore()
+    try:
+        backend = store.set_key(provider, secret)
+    except KeyringBackendError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    cfg["cloud_provider"] = provider
+    if args.base_url is not None:
+        cfg["cloud_base_url"] = args.base_url.strip()
+    if args.model is not None:
+        cfg["cloud_model"] = args.model.strip()
+    save_nonsecret_config(cfg)
+
+    print(f"Stored {provider} API key securely via {backend} (zero plaintext files).")
+    return 0
+
+
+def cmd_get_key(args: argparse.Namespace) -> int:
+    cfg = load_nonsecret_config()
+    provider = (args.provider or cfg.get("cloud_provider") or "openai").lower()
+    store = KeyringStore()
+    secret = store.get_key(provider)
+
+    if args.raw:
+        if not secret:
+            return 1
+        print(secret)
+        return 0
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "configured": bool(secret),
+                    "provider": provider,
+                    "masked_key": mask_secret(secret) if secret else None,
+                    "base_url": cfg.get("cloud_base_url", ""),
+                    "model": cfg.get("cloud_model", ""),
+                },
+                indent=2,
+            )
+        )
+        return 0 if secret else 1
+
+    if secret:
+        print(f"Provider: {provider} | Key: configured ({mask_secret(secret)})")
+        return 0
+    print(f"Provider: {provider} | Key: not configured")
+    return 1
+
+
+def cmd_clear_key(args: argparse.Namespace) -> int:
+    cfg = load_nonsecret_config()
+    store = KeyringStore()
+    providers = (
+        list(CLOUD_ENDPOINTS.keys()) + ["custom"]
+        if args.all
+        else [(args.provider or cfg.get("cloud_provider") or "openai").lower()]
+    )
+    cleared_any = False
+    for p in providers:
+        if store.clear_key(p):
+            cleared_any = True
+    print("Cleared stored API key(s) from keyring." if cleared_any else "No matching stored API key found.")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="k-ai-engine",
+        description="Kushagra OS K-AI Lazy On-Demand Inference Supervisor & Cloud Bridge.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_serve = sub.add_parser("serve", help="Run the K-AI lazy supervisor HTTP server.")
+    p_serve.add_argument("--host", default=DEFAULT_HOST)
+    p_serve.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p_serve.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_TIMEOUT)
+    p_serve.set_defaults(func=cmd_serve)
+
+    p_status = sub.add_parser("status", help="Show K-AI hardware tier, loaded model, RSS, and idle timer.")
+    p_status.add_argument("--json", action="store_true")
+    p_status.set_defaults(func=cmd_status)
+
+    p_unload = sub.add_parser("unload", help="Unload running llama-server immediately to reclaim RAM.")
+    p_unload.set_defaults(func=cmd_unload)
+
+    p_chat = sub.add_parser("chat", help="Send a chat completion request through K-AI Engine.")
+    p_chat.add_argument("text", nargs="*", help="Prompt text.")
+    p_chat.add_argument("--prompt", default="", help="Prompt string.")
+    p_chat.add_argument("--system", default="", help="Optional system prompt.")
+    p_chat.add_argument("--model", default="", help="Model override.")
+    p_chat.add_argument("--provider", choices=["auto", "local", "cloud"], default="auto")
+    p_chat.add_argument("--json", action="store_true")
+    p_chat.set_defaults(func=cmd_chat)
+
+    p_set = sub.add_parser("set-key", help="Store Cloud API key securely in KWallet / Secret Service.")
+    p_set.add_argument("--provider", choices=["openai", "groq", "gemini", "custom"])
+    p_set.add_argument("--base-url", default=None, help="HTTPS base URL for custom OpenAI-compatible provider.")
+    p_set.add_argument("--model", default=None, help="Default Cloud model override.")
+    p_set.add_argument("--key", default=None, help="API key (prefer stdin or interactive prompt).")
+    p_set.set_defaults(func=cmd_set_key)
+
+    p_get = sub.add_parser("get-key", help="Check Cloud API key configuration in KWallet / Secret Service.")
+    p_get.add_argument("--provider", choices=["openai", "groq", "gemini", "custom"])
+    p_get.add_argument("--raw", action="store_true", help="Print raw API key (exit 1 if unset).")
+    p_get.add_argument("--json", action="store_true")
+    p_get.set_defaults(func=cmd_get_key)
+
+    p_clr = sub.add_parser("clear-key", help="Remove Cloud API key from KWallet / Secret Service.")
+    p_clr.add_argument("--provider", choices=["openai", "groq", "gemini", "custom"])
+    p_clr.add_argument("--all", action="store_true")
+    p_clr.set_defaults(func=cmd_clear_key)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

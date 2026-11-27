@@ -16,3 +16,9 @@ _launch=Alt+Space\tSearch
 
 [services][org.kde.plasma-systemmonitor.desktop]
 _launch=Ctrl+Shift+Esc
+
+[services][k-ai-drawer.desktop]
+_launch=Meta+Space
+
+[services][k-ai-followalong.desktop]
+_launch=Ctrl+Shift+A

@@ -51,8 +51,25 @@ install:
     - libblockdev-dm
     - partitionmanager
 
-    # --- Custom First-Boot OOBE Setup Wizard (Qt6/QML) ---
+    # --- Custom First-Boot OOBE & K-AI UI/D-Bus (Qt6/QML + Gio DBus) ---
     - python3-pyqt6
+    - python3-gobject
+
+    # --- K-AI Hybrid Inference Engine & Multimodal Utilities ---
+    - llama-cpp
+    - vulkan-tools
+    - tesseract
+    - tesseract-langpack-hin
+    - spectacle
+    - wl-clipboard
+
+    # --- Creator & Dual-Boot Bridges (DaVinci Resolve / WinApps / Windows Reboot) ---
+    - distrobox
+    - freerdp
+    - qemu-kvm
+    - edk2-ovmf
+    - efibootmgr
+    - ffmpeg
 
     # --- Desktop Utilities & Phone Connectivity ---
     - plasma-firewall

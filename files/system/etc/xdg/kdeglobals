@@ -1,0 +1,11 @@
+[General]
+AccentColor=255,153,51
+ColorScheme=KushagraGlassDark
+accentColorFromWallpaper=false
+
+[Icons]
+Theme=breeze-dark
+
+[KDE]
+LookAndFeelPackage=org.kde.breezedark.desktop
+widgetStyle=Breeze

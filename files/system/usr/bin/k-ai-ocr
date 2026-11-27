@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""Kushagra OS K-AI On-Demand Screen OCR (Strict Privacy: User-Triggered Only).
+
+Captures a single transient screenshot via XDG Desktop Portal (falling back to
+Spectacle if portal D-Bus is unavailable), runs Tesseract OCR (`eng+hin` with
+`eng` fallback), copies extracted text to Wayland clipboard, and immediately
+shreds and deletes all temporary image data in a guaranteed finally/cleanup path.
+Zero background services, zero timers, zero persistent images stored on disk.
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import json
+import os
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+
+def _shred_file(path: Path) -> None:
+    """Overwrite file contents with zeroes, sync, and unlink."""
+    try:
+        if not path.exists() or not path.is_file() or path.is_symlink():
+            return
+        size = path.stat().st_size
+        if size > 0:
+            chunk = b"\x00" * min(size, 65536)
+            with open(path, "r+b", buffering=0) as fp:
+                remaining = size
+                while remaining > 0:
+                    n = min(remaining, len(chunk))
+                    fp.write(chunk[:n])
+                    remaining -= n
+                fp.flush()
+                os.fsync(fp.fileno())
+        path.unlink(missing_ok=True)
+    except OSError:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _cleanup_workspace(tmpdir: Path | None, extra_transient: list[Path]) -> None:
+    """Shred and remove all temporary files and the private 0700 workspace."""
+    for extra in extra_transient:
+        _shred_file(extra)
+    if tmpdir is not None and tmpdir.exists():
+        try:
+            for item in tmpdir.rglob("*"):
+                if item.is_file():
+                    _shred_file(item)
+        except OSError:
+            pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _is_transient_portal_file(path: Path, capture_start_ts: float) -> bool:
+    """Return True if path is a transient portal image safe to shred after OCR."""
+    resolved = path.resolve()
+    transient_roots = [Path("/tmp"), Path("/var/tmp")]
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if xdg_runtime:
+        transient_roots.append(Path(xdg_runtime))
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    transient_roots.append(cache_home)
+
+    for root in transient_roots:
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            continue
+
+    try:
+        st = resolved.stat()
+        if st.st_mtime >= (capture_start_ts - 2.0) and resolved.name.startswith(
+            ("Screenshot", "spectacle", "portal")
+        ):
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _capture_via_portal(
+    dest_path: Path, interactive: bool, capture_start_ts: float
+) -> tuple[str, str, list[Path]]:
+    """Capture one screenshot via org.freedesktop.portal.Screenshot.Screenshot.
+
+    Returns (status, detail_message, transient_portal_files) where status is one of:
+    'ok', 'cancelled', 'unavailable', 'error'.
+    """
+    transient_files: list[Path] = []
+    try:
+        from PyQt6.QtCore import QCoreApplication, QEventLoop, QObject, QTimer, pyqtSlot
+        from PyQt6.QtDBus import (
+            QDBusConnection,
+            QDBusInterface,
+            QDBusMessage,
+            QDBusObjectPath,
+        )
+    except Exception as exc:
+        return "unavailable", f"PyQt6.QtDBus unavailable: {exc}", transient_files
+
+    app = QCoreApplication.instance()
+    owns_app = app is None
+    if owns_app:
+        app = QCoreApplication([sys.argv[0]])
+
+    bus = QDBusConnection.sessionBus()
+    if not bus.isConnected():
+        return "unavailable", "Session D-Bus is not connected", transient_files
+
+    base_service = bus.baseService().lstrip(":").replace(".", "_")
+    if not base_service:
+        return "unavailable", "Unable to resolve D-Bus unique name", transient_files
+
+    token = f"kaiocr_{os.getpid()}_{secrets.token_hex(4)}"
+    expected_path = f"/org/freedesktop/portal/desktop/request/{base_service}/{token}"
+
+    loop = QEventLoop()
+    state: dict[str, object] = {"done": False, "code": None, "uri": "", "error": ""}
+
+    class PortalReceiver(QObject):
+        @pyqtSlot(QDBusMessage)
+        def onResponse(self, msg: QDBusMessage) -> None:
+            if state["done"]:
+                return
+            args = msg.arguments()
+            code = int(args[0]) if len(args) >= 1 else 2
+            results = args[1] if len(args) >= 2 and isinstance(args[1], dict) else {}
+            state["code"] = code
+            state["uri"] = str(results.get("uri", ""))
+            state["done"] = True
+            loop.quit()
+
+    receiver = PortalReceiver()
+    bus.registerObject("/", receiver)
+
+    def _connect_handle(obj_path: str) -> None:
+        bus.connect(
+            "org.freedesktop.portal.Desktop",
+            obj_path,
+            "org.freedesktop.portal.Request",
+            "Response",
+            receiver.onResponse,
+        )
+
+    _connect_handle(expected_path)
+
+    iface = QDBusInterface(
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Screenshot",
+        bus,
+    )
+    if not iface.isValid():
+        return "unavailable", "XDG Desktop Portal Screenshot interface unavailable", transient_files
+
+    options = {
+        "handle_token": token,
+        "modal": True,
+        "interactive": bool(interactive),
+    }
+    reply = iface.call("Screenshot", "", options)
+    if reply.type() == QDBusMessage.MessageType.ErrorMessage:
+        return "unavailable", reply.errorMessage() or "Portal Screenshot call failed", transient_files
+
+    if reply.arguments():
+        first = reply.arguments()[0]
+        actual_path = first.path() if isinstance(first, QDBusObjectPath) else str(first)
+        if actual_path and actual_path != expected_path:
+            _connect_handle(actual_path)
+
+    if not state["done"]:
+        timeout_timer = QTimer()
+        timeout_timer.setSingleShot(True)
+        timeout_timer.timeout.connect(loop.quit)
+        timeout_timer.start(60000)
+        loop.exec()
+        timeout_timer.stop()
+
+    if not state["done"]:
+        return "error", "Timed out waiting for portal screenshot response", transient_files
+
+    code = state["code"]
+    if code == 1:
+        return "cancelled", "Screenshot cancelled by user", transient_files
+    if code != 0:
+        return "error", f"Portal screenshot failed with response code {code}", transient_files
+
+    uri = str(state["uri"] or "")
+    parsed = urlparse(uri)
+    if parsed.scheme != "file" or not parsed.path:
+        return "error", f"Unexpected portal screenshot URI: {uri}", transient_files
+
+    src_path = Path(unquote(parsed.path))
+    if not src_path.is_file():
+        return "error", f"Portal screenshot missing on disk: {src_path}", transient_files
+
+    try:
+        shutil.copyfile(src_path, dest_path)
+        os.chmod(dest_path, 0o600)
+    except OSError as exc:
+        return "error", f"Failed to copy portal screenshot: {exc}", transient_files
+    finally:
+        if _is_transient_portal_file(src_path, capture_start_ts):
+            transient_files.append(src_path)
+            _shred_file(src_path)
+
+    return "ok", "portal", transient_files
+
+
+def _capture_via_spectacle(dest_path: Path, fullscreen: bool) -> tuple[str, str]:
+    """Fallback single-shot capture via KDE Spectacle into private temp file."""
+    spectacle = shutil.which("spectacle")
+    if not spectacle:
+        return "unavailable", "spectacle binary not found"
+
+    mode_flag = "-f" if fullscreen else "-r"
+    t0 = time.monotonic()
+    try:
+        res = subprocess.run(
+            [spectacle, "-b", "-n", mode_flag, "-o", str(dest_path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "error", "Spectacle capture timed out"
+    except OSError as exc:
+        return "error", f"Spectacle execution error: {exc}"
+
+    elapsed = time.monotonic() - t0
+    if res.returncode == 0 and dest_path.is_file() and dest_path.stat().st_size > 0:
+        os.chmod(dest_path, 0o600)
+        return "ok", "spectacle"
+
+    # If interactive region mode was cancelled by pressing Esc, respect cancel.
+    if mode_flag == "-r" and elapsed > 0.35 and not dest_path.exists():
+        stderr_lower = (res.stderr or "").lower()
+        if "not supported" not in stderr_lower and "error" not in stderr_lower:
+            return "cancelled", "Region selection cancelled by user"
+
+    # Retry fullscreen once only if region mode failed immediately/unsupported.
+    if mode_flag == "-r":
+        try:
+            res_full = subprocess.run(
+                [spectacle, "-b", "-n", "-f", "-o", str(dest_path)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if (
+                res_full.returncode == 0
+                and dest_path.is_file()
+                and dest_path.stat().st_size > 0
+            ):
+                os.chmod(dest_path, 0o600)
+                return "ok", "spectacle-fullscreen"
+        except Exception:
+            pass
+
+    detail = (res.stderr or res.stdout or f"exit code {res.returncode}").strip()
+    return "error", f"Spectacle capture failed: {detail}"
+
+
+def _run_tesseract(img_path: Path) -> tuple[bool, str, str]:
+    """Run Tesseract OCR preferring eng+hin with clean eng fallback."""
+    tesseract = shutil.which("tesseract")
+    if not tesseract:
+        return False, "", "tesseract binary not found (install tesseract and tesseract-langpack-hin)"
+
+    for lang in ("eng+hin", "eng"):
+        try:
+            res = subprocess.run(
+                [tesseract, str(img_path), "stdout", "-l", lang],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if res.returncode == 0:
+                return True, res.stdout.strip(), lang
+        except subprocess.TimeoutExpired:
+            return False, "", f"tesseract timed out ({lang})"
+        except OSError as exc:
+            return False, "", f"tesseract execution error: {exc}"
+
+    return False, "", "tesseract failed for both eng+hin and eng"
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Copy text to Wayland clipboard without hanging on wl-copy fork."""
+    if not text:
+        return False
+    wl_copy = shutil.which("wl-copy")
+    if not wl_copy:
+        return False
+    try:
+        res = subprocess.run(
+            [wl_copy],
+            input=text,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _notify_user(title: str, body: str, is_error: bool = False) -> None:
+    """Display brief desktop feedback when invoked interactively without --json."""
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        return
+    notify_send = shutil.which("notify-send")
+    if notify_send:
+        urgency = "critical" if is_error else "normal"
+        subprocess.run(
+            [notify_send, "-a", "K-AI OCR", "-u", urgency, title, body],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+    kdialog = shutil.which("kdialog")
+    if kdialog:
+        subprocess.run(
+            [kdialog, "--passivepopup", body, "4", "--title", title],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="k-ai-ocr",
+        description="On-demand K-AI Screen OCR (user-triggered single capture, zero retention).",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit structured JSON output")
+    parser.add_argument(
+        "--no-copy", action="store_true", help="Do not copy extracted text to clipboard"
+    )
+    parser.add_argument(
+        "--fullscreen",
+        action="store_true",
+        help="Capture full screen when falling back outside interactive region picker",
+    )
+    return parser.parse_args(argv)
+
+
+def main() -> int:
+    args = parse_args(sys.argv[1:])
+    os.umask(0o077)
+
+    tmpdir: Path | None = None
+    extra_transient: list[Path] = []
+    cleaned = {"done": False}
+
+    def _safe_cleanup(*_args) -> None:
+        if cleaned["done"]:
+            return
+        cleaned["done"] = True
+        _cleanup_workspace(tmpdir, extra_transient)
+
+    atexit.register(_safe_cleanup)
+    for sig_name in ("SIGINT", "SIGTERM", "SIGHUP"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            def _sig_handler(_signum, _frame):
+                _safe_cleanup()
+                raise SystemExit(130)
+            signal.signal(sig, _sig_handler)
+
+    def _emit(ok: bool, payload: dict, exit_code: int) -> int:
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            if ok:
+                text = payload.get("text", "")
+                if text:
+                    print(text)
+                    copied_note = " (copied to clipboard)" if payload.get("copied") else ""
+                    _notify_user(
+                        "K-AI Screen OCR",
+                        f"Extracted {len(text)} characters{copied_note}. Temp image shredded.",
+                    )
+                else:
+                    _notify_user("K-AI Screen OCR", "No readable text detected in selection.")
+            elif payload.get("cancelled"):
+                print("Cancelled.", file=sys.stderr)
+            else:
+                err = payload.get("error", "OCR failed")
+                print(err, file=sys.stderr)
+                _notify_user("K-AI Screen OCR Error", err, is_error=True)
+        return exit_code
+
+    try:
+        tmpdir = Path(tempfile.mkdtemp(prefix="k-ai-ocr-"))
+        os.chmod(tmpdir, 0o700)
+        tmp_img = tmpdir / "capture.png"
+        capture_start_ts = time.time()
+
+        status, method_or_err, portal_extras = _capture_via_portal(
+            tmp_img, interactive=not args.fullscreen, capture_start_ts=capture_start_ts
+        )
+        extra_transient.extend(portal_extras)
+
+        if status == "cancelled":
+            return _emit(
+                False,
+                {"ok": False, "cancelled": True, "error": method_or_err},
+                1,
+            )
+
+        capture_method = method_or_err
+        if status != "ok":
+            spec_status, spec_detail = _capture_via_spectacle(tmp_img, fullscreen=args.fullscreen)
+            if spec_status == "cancelled":
+                return _emit(
+                    False,
+                    {"ok": False, "cancelled": True, "error": spec_detail},
+                    1,
+                )
+            if spec_status != "ok":
+                return _emit(
+                    False,
+                    {
+                        "ok": False,
+                        "cancelled": False,
+                        "error": f"{method_or_err}; fallback failed: {spec_detail}",
+                    },
+                    1,
+                )
+            capture_method = spec_detail
+
+        ocr_ok, text, lang_or_err = _run_tesseract(tmp_img)
+        if not ocr_ok:
+            return _emit(
+                False,
+                {"ok": False, "cancelled": False, "error": lang_or_err},
+                1,
+            )
+
+        copied = False if args.no_copy else _copy_to_clipboard(text)
+        return _emit(
+            True,
+            {
+                "ok": True,
+                "text": text,
+                "copied": copied,
+                "lang": lang_or_err,
+                "method": capture_method,
+            },
+            0,
+        )
+    finally:
+        _safe_cleanup()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

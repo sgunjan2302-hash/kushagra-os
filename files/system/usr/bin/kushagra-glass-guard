@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Liquid Glass Hardware & Low-RAM Guard
+# Disables KWin blur automatically on <= 4.5 GiB RAM or llvmpipe/softpipe renderers
+# when mode is 'auto' (or 'on'), while respecting explicit 'force-on'.
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}"
+STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}"
+MODE_FILE="${CONFIG_DIR}/kushagra-glass-mode"
+STATUS_FILE="${STATE_DIR}/kushagra-glass-guard.status"
+MEMINFO_FILE="${KUSHAGRA_MEMINFO_FILE:-/proc/meminfo}"
+SYS_DRM_DIR="${KUSHAGRA_SYS_DRM_DIR:-/sys/class/drm}"
+
+TOGGLE_BIN="${KUSHAGRA_GLASS_TOGGLE_BIN:-$(dirname "$0")/kushagra-glass-toggle}"
+if [ ! -x "${TOGGLE_BIN}" ]; then
+    TOGGLE_BIN="/usr/bin/kushagra-glass-toggle"
+fi
+
+LOW_RAM_THRESHOLD_KB=4718592 # 4.5 GiB in KiB
+
+read_mode_pref() {
+    local mode="auto"
+    if [ -f "${MODE_FILE}" ]; then
+        local raw
+        raw="$(tr -d '\r' < "${MODE_FILE}" | grep -Ev '^[[:space:]]*(#|$)' | head -n1 || true)"
+        raw="${raw#mode=}"
+        raw="$(printf '%s' "${raw}" | xargs | tr '[:upper:]' '[:lower:]')"
+        case "${raw}" in
+            on|off|auto|force-on) mode="${raw}" ;;
+        esac
+    fi
+    printf '%s' "${mode}"
+}
+
+detect_ram_kb() {
+    local kb=0
+    if [ -r "${MEMINFO_FILE}" ]; then
+        kb="$(awk '/^MemTotal:/ { print $2; exit }' "${MEMINFO_FILE}" 2>/dev/null || echo 0)"
+    fi
+    if ! [[ "${kb}" =~ ^[0-9]+$ ]]; then
+        kb=0
+    fi
+    printf '%s' "${kb}"
+}
+
+run_with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2 "$@"
+    else
+        "$@"
+    fi
+}
+
+SW_RENDER="false"
+RENDERER="unknown"
+
+detect_gpu_renderer() {
+    # 1. Explicit software rendering overrides
+    case "$(printf '%s' "${LIBGL_ALWAYS_SOFTWARE:-}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes)
+            SW_RENDER="true"
+            RENDERER="env:LIBGL_ALWAYS_SOFTWARE"
+            return 0
+            ;;
+    esac
+    if [[ "${MESA_LOADER_DRIVER_OVERRIDE:-}" =~ ^(llvmpipe|softpipe|swrast)$ ]]; then
+        SW_RENDER="true"
+        RENDERER="env:${MESA_LOADER_DRIVER_OVERRIDE}"
+        return 0
+    fi
+    if [ "${KWIN_COMPOSE:-}" = "Q" ]; then
+        SW_RENDER="true"
+        RENDERER="env:KWIN_COMPOSE=Q"
+        return 0
+    fi
+
+    # 2. Query active KWin Wayland compositor supportInformation if running
+    local qdbus_bin="" candidate=""
+    for candidate in qdbus-qt6 /usr/lib64/qt6/bin/qdbus qdbus6 qdbus; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            qdbus_bin="${candidate}"
+            break
+        fi
+    done
+    if [ -n "${qdbus_bin}" ]; then
+        local kwin_info="" kwin_renderer="" kwin_comp=""
+        kwin_info="$(run_with_timeout "${qdbus_bin}" org.kde.KWin /KWin supportInformation 2>/dev/null || true)"
+        if [ -n "${kwin_info}" ]; then
+            kwin_renderer="$(printf '%s\n' "${kwin_info}" | awk '/OpenGL renderer string|GL Renderer/ { sub(/^[^:]+:[[:space:]]*/, ""); gsub(/[[:space:]]+$/, ""); print; exit }' || true)"
+            kwin_comp="$(printf '%s\n' "${kwin_info}" | awk '/Compositing Type/ { sub(/^[^:]+:[[:space:]]*/, ""); gsub(/[[:space:]]+$/, ""); print; exit }' || true)"
+            if [[ "${kwin_renderer}" =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt] ]]; then
+                SW_RENDER="true"
+                RENDERER="${kwin_renderer}"
+                return 0
+            elif [[ "${kwin_comp}" =~ [Qq][Pp]ainter ]]; then
+                SW_RENDER="true"
+                RENDERER="QPainter"
+                return 0
+            elif [ -n "${kwin_renderer}" ]; then
+                SW_RENDER="false"
+                RENDERER="${kwin_renderer}"
+                return 0
+            fi
+        fi
+    fi
+
+    # 3. Probe glxinfo -B if DISPLAY is available
+    if [ -n "${DISPLAY:-}" ] && command -v glxinfo >/dev/null 2>&1; then
+        local glx_renderer=""
+        glx_renderer="$(run_with_timeout glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer string/ { sub(/^[^:]+:[[:space:]]*/, ""); print; exit }' || true)"
+        if [ -n "${glx_renderer}" ]; then
+            RENDERER="${glx_renderer}"
+            if [[ "${glx_renderer}" =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt] ]]; then
+                SW_RENDER="true"
+            else
+                SW_RENDER="false"
+            fi
+            return 0
+        fi
+    fi
+
+    # 4. Probe eglinfo -B active Wayland/X11/GBM platform renderer (ignore Device platform llvmpipe fallback)
+    if command -v eglinfo >/dev/null 2>&1; then
+        local egl_out="" egl_renderer=""
+        egl_out="$(run_with_timeout eglinfo -B 2>/dev/null || true)"
+        egl_renderer="$(printf '%s\n' "${egl_out}" | awk '
+            /^(Wayland|X11|GBM) platform:/ { in_active=1; next }
+            /^[A-Za-z0-9_ ]+ platform:/ { in_active=0 }
+            in_active && /OpenGL.*renderer:/ {
+                sub(/^[^:]+:[[:space:]]*/, "");
+                print;
+                exit;
+            }' || true)"
+        if [ -n "${egl_renderer}" ]; then
+            RENDERER="${egl_renderer}"
+            if [[ "${egl_renderer}" =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt] ]]; then
+                SW_RENDER="true"
+            else
+                SW_RENDER="false"
+            fi
+            return 0
+        fi
+    fi
+
+    # 5. Probe vulkaninfo --summary (flag software only if CPU device is the sole Vulkan device)
+    if command -v vulkaninfo >/dev/null 2>&1; then
+        local vk_out="" has_hw_vk=0 has_cpu_vk=0 cpu_name=""
+        vk_out="$(run_with_timeout vulkaninfo --summary 2>/dev/null || true)"
+        if printf '%s\n' "${vk_out}" | grep -qE 'PHYSICAL_DEVICE_TYPE_(INTEGRATED|DISCRETE|VIRTUAL)_GPU'; then
+            has_hw_vk=1
+        fi
+        if printf '%s\n' "${vk_out}" | grep -qiE 'PHYSICAL_DEVICE_TYPE_CPU|llvmpipe'; then
+            has_cpu_vk=1
+            cpu_name="$(printf '%s\n' "${vk_out}" | awk -F= '/deviceName/ { gsub(/^[[:space:]]+/, "", $2); print $2; exit }' || true)"
+        fi
+        if [ "${has_hw_vk}" -eq 1 ]; then
+            SW_RENDER="false"
+            RENDERER="vulkan-hardware-gpu"
+            return 0
+        elif [ "${has_cpu_vk}" -eq 1 ]; then
+            SW_RENDER="true"
+            RENDERER="${cpu_name:-llvmpipe}"
+            return 0
+        fi
+    fi
+
+    # 6. Sysfs /sys/class/drm fallback check
+    if [ -d "${SYS_DRM_DIR}" ]; then
+        local has_hw_drm=0 has_virtio_drm=0 has_sw_drm=0 has_render_node=0
+        local drv="" card_dir=""
+        shopt -s nullglob
+        for _ in "${SYS_DRM_DIR}"/renderD*; do
+            has_render_node=1
+            break
+        done
+        for card_dir in "${SYS_DRM_DIR}"/card[0-9]*; do
+            [ -d "${card_dir}/device" ] || continue
+            drv=""
+            if [ -f "${card_dir}/device/uevent" ]; then
+                drv="$(awk -F= '/^DRIVER=/{print $2; exit}' "${card_dir}/device/uevent" 2>/dev/null || true)"
+            fi
+            if [ -z "${drv}" ] && [ -L "${card_dir}/device/driver" ]; then
+                drv="$(basename "$(readlink -f "${card_dir}/device/driver")" 2>/dev/null || true)"
+            fi
+            case "${drv}" in
+                i915|xe|amdgpu|radeon|nouveau|nvidia|panfrost|lima|etnaviv|msm|tegra|v3d|vc4)
+                    has_hw_drm=1
+                    RENDERER="drm:${drv}"
+                    ;;
+                virtio-pci|virtio_gpu|vmwgfx)
+                    has_virtio_drm=1
+                    RENDERER="drm:${drv}"
+                    ;;
+                bochs-drm|simple-framebuffer|efifb|vesafb|cirrus|mgag200|qxl|vkms|udl)
+                    has_sw_drm=1
+                    if [ "${RENDERER}" = "unknown" ]; then
+                        RENDERER="drm:${drv}"
+                    fi
+                    ;;
+            esac
+        done
+        shopt -u nullglob
+
+        if [ "${has_hw_drm}" -eq 1 ]; then
+            SW_RENDER="false"
+        elif [ "${has_virtio_drm}" -eq 1 ]; then
+            if [ "${has_render_node}" -eq 1 ]; then
+                SW_RENDER="false"
+            else
+                SW_RENDER="true"
+                RENDERER="${RENDERER} (no render node -> llvmpipe)"
+            fi
+        elif [ "${has_sw_drm}" -eq 1 ]; then
+            SW_RENDER="true"
+        fi
+    fi
+}
+
+MODE="$(read_mode_pref)"
+MEM_TOTAL_KB="$(detect_ram_kb)"
+LOW_RAM="false"
+if [ "${MEM_TOTAL_KB}" -gt 0 ] && [ "${MEM_TOTAL_KB}" -le "${LOW_RAM_THRESHOLD_KB}" ]; then
+    LOW_RAM="true"
+fi
+
+detect_gpu_renderer
+
+ACTION="unchanged"
+REASON="capable_hardware"
+
+if [ "${MODE}" = "force-on" ]; then
+    ACTION="enabled"
+    REASON="user_force_on"
+    KUSHAGRA_GUARD_ACTIVE=1 "${TOGGLE_BIN}" on --force >/dev/null
+elif [ "${MODE}" = "off" ]; then
+    ACTION="disabled"
+    REASON="user_off"
+    KUSHAGRA_GUARD_ACTIVE=1 "${TOGGLE_BIN}" off --guard >/dev/null
+else
+    if [ "${LOW_RAM}" = "true" ] && [ "${SW_RENDER}" = "true" ]; then
+        ACTION="disabled"
+        REASON="low_ram,software_renderer"
+        KUSHAGRA_GUARD_ACTIVE=1 "${TOGGLE_BIN}" off --guard >/dev/null
+    elif [ "${LOW_RAM}" = "true" ]; then
+        ACTION="disabled"
+        REASON="low_ram"
+        KUSHAGRA_GUARD_ACTIVE=1 "${TOGGLE_BIN}" off --guard >/dev/null
+    elif [ "${SW_RENDER}" = "true" ]; then
+        ACTION="disabled"
+        REASON="software_renderer"
+        KUSHAGRA_GUARD_ACTIVE=1 "${TOGGLE_BIN}" off --guard >/dev/null
+    else
+        ACTION="enabled"
+        REASON="capable_hardware"
+        KUSHAGRA_GUARD_ACTIVE=1 "${TOGGLE_BIN}" on --guard >/dev/null
+    fi
+fi
+
+mkdir -p "${STATE_DIR}"
+TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo 'unknown')"
+cat <<EOF > "${STATUS_FILE}"
+timestamp=${TIMESTAMP}
+mode=${MODE}
+action=${ACTION}
+reason=${REASON}
+mem_total_kb=${MEM_TOTAL_KB}
+low_ram=${LOW_RAM}
+software_renderer=${SW_RENDER}
+renderer=${RENDERER}
+EOF
+
+echo "kushagra-glass-guard: mode=${MODE} action=${ACTION} reason=${REASON} mem_kb=${MEM_TOTAL_KB} low_ram=${LOW_RAM} sw_render=${SW_RENDER} renderer='${RENDERER}'"

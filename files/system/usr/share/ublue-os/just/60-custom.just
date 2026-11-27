@@ -15,6 +15,9 @@ low-ram-mode ACTION="status":
             kwriteconfig6 --file baloofilerc --group "Basic Settings" --key "Indexing-Enabled" false
             kwriteconfig6 --file kwinrc --group "Plugins" --key "blurEnabled" false
             kwriteconfig6 --file kwinrc --group "KWin" --key "AnimationDurationFactor" 0.5
+            if [ -x /usr/bin/kushagra-glass-toggle ]; then
+                /usr/bin/kushagra-glass-toggle off >/dev/null 2>&1 || true
+            fi
             echo "Low-RAM Mode enabled: Baloo indexing disabled, KWin blur disabled, animations accelerated."
             echo "Please log out and log back in for Plasma settings to take full effect."
             ;;
@@ -23,6 +26,9 @@ low-ram-mode ACTION="status":
             kwriteconfig6 --file baloofilerc --group "Basic Settings" --key "Indexing-Enabled" true
             kwriteconfig6 --file kwinrc --group "Plugins" --key "blurEnabled" true
             kwriteconfig6 --file kwinrc --group "KWin" --key "AnimationDurationFactor" 1.0
+            if [ -x /usr/bin/kushagra-glass-toggle ]; then
+                /usr/bin/kushagra-glass-toggle auto >/dev/null 2>&1 || true
+            fi
             echo "Standard visual defaults restored."
             ;;
         status|*)
@@ -309,3 +315,25 @@ setup-usbguard ACTION="status":
 # Configure school/office local LAN update mirror (set <host:port> [--insecure] | reset | status)
 setup-lan-mirror *ARGS:
     @/usr/libexec/kushagra-lan-mirror {{ARGS}}
+
+# Toggle safe Liquid Glass blur effect on Plasma 6.8.3 (on|off|auto|force-on|status)
+toggle-glass ACTION="status":
+    @/usr/bin/kushagra-glass-toggle "{{ACTION}}"
+
+# Show K-AI hardware tier profile, lazy inference status, and Cloud keyring readiness
+k-ai-status:
+    @/usr/bin/k-ai-detect
+    @echo ""
+    @/usr/bin/k-ai-engine status || true
+
+# Run DaVinci Resolve GPU/VRAM/codec preflight or install into davincibox (--check | --dry-run | -i <installer>)
+install-resolve *ARGS:
+    @/usr/libexec/kushagra-resolve-setup {{ARGS}}
+
+# Check prerequisites or configure opt-in KVM/FreeRDP3 WinApps bridge (check | status | install --yes)
+setup-winapps *ARGS:
+    @/usr/libexec/kushagra-winapps-setup {{ARGS}}
+
+# One-time reboot into dual-boot Windows Boot Manager without modifying BootOrder (--check | --dry-run)
+reboot-windows *ARGS:
+    @/usr/bin/kushagra-reboot-windows {{ARGS}}

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - K-AI Frosted-Glass Wayland Side Drawer Launcher
+exec /usr/bin/python3 /usr/share/kushagra-os/kai/main.py "$@"

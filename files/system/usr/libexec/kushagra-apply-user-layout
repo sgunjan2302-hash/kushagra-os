@@ -34,11 +34,13 @@ reinforce_shortcuts_and_welcome() {
         # Preserve Clipboard history at mouse position (Meta+V)
         kwriteconfig6 --file kglobalshortcutsrc --group plasmashell --key "show-on-mouse-pos" "Meta+V,Meta+V,Show Clipboard Items at Mouse Position" || true
 
-        # Windows muscle-memory app shortcuts
+        # Windows muscle-memory app shortcuts & K-AI global triggers
         kwriteconfig6 --file kglobalshortcutsrc --group services --group org.kde.plasma-systemmonitor.desktop --key _launch "Ctrl+Shift+Esc" || true
         kwriteconfig6 --file kglobalshortcutsrc --group services --group org.kde.konsole.desktop --key _launch "Ctrl+Alt+T" || true
         kwriteconfig6 --file kglobalshortcutsrc --group services --group org.kde.dolphin.desktop --key _launch "Meta+E" || true
         kwriteconfig6 --file kglobalshortcutsrc --group services --group org.kde.krunner.desktop --key _launch $'Alt+Space\tSearch' || true
+        kwriteconfig6 --file kglobalshortcutsrc --group services --group k-ai-drawer.desktop --key _launch "Meta+Space" || true
+        kwriteconfig6 --file kglobalshortcutsrc --group services --group k-ai-followalong.desktop --key _launch "Ctrl+Shift+A" || true
     fi
 
     if [ -n "${QDBUS_BIN:-}" ]; then

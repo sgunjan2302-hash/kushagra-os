@@ -4,6 +4,7 @@ set -euo pipefail
 for s in \
     files/scripts/*.sh \
     files/system/usr/bin/kushagra-* \
+    files/system/usr/bin/k-ai-drawer \
     files/system/usr/libexec/kushagra-setup-bootutil \
     files/system/usr/libexec/kushagra-oobe-apply \
     files/system/usr/libexec/kushagra-apply-user-layout \
@@ -11,6 +12,9 @@ for s in \
     files/system/usr/libexec/kushagra-kavach-dns \
     files/system/usr/libexec/kushagra-usbguard-setup \
     files/system/usr/libexec/kushagra-lan-mirror \
+    files/system/usr/libexec/kushagra-resolve-setup \
+    files/system/usr/libexec/kushagra-winapps-setup \
+    files/system/usr/lib/systemd/system-generators/kushagra-live-plymouth-generator \
     files/system/usr/share/kushagra-os/livesys/livesys-session-extra; do
     bash -n "$s"
     echo "PASS bash -n: $s"
@@ -30,10 +34,17 @@ trap 'rm -rf "$TMP_PYCACHE"' EXIT
 export PYTHONPYCACHEPREFIX="$TMP_PYCACHE"
 
 for py in \
+    files/system/usr/bin/k-ai-detect \
+    files/system/usr/bin/k-ai-engine \
+    files/system/usr/bin/k-ai-followalong \
+    files/system/usr/bin/k-ai-ocr \
+    files/system/usr/libexec/k-ai-broker \
+    files/system/usr/libexec/k-ai-krunner \
     files/system/usr/share/kushagra-os/oobe/*.py \
     files/system/usr/share/kushagra-os/installer/*.py \
     files/system/usr/share/kushagra-os/winrun/*.py \
     files/system/usr/share/kushagra-os/apkrun/*.py \
+    files/system/usr/share/kushagra-os/kai/*.py \
     files/system/usr/libexec/kushagra-installer-backend; do
     "$PY_BIN" -m py_compile "$py"
     echo "PASS py_compile: $py"

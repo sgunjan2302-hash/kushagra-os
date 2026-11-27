@@ -1,0 +1,2 @@
+# Kushagra OS - Grant desktop users & sandboxed Wine/Bottles prefixes access to /dev/ntsync
+KERNEL=="ntsync", MODE="0666", TAG+="uaccess"

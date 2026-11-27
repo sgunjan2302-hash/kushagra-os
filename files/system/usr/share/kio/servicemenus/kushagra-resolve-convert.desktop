@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Service
+MimeType=video/*;
+Actions=ConvertForResolve;
+
+[Desktop Action ConvertForResolve]
+Name=Convert for DaVinci Resolve (DNxHR + WAV)
+Icon=video-x-generic
+Exec=konsole --hold -e /usr/bin/kushagra-resolve-convert %F

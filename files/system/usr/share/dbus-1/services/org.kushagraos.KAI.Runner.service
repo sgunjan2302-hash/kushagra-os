@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.kushagraos.KAI.Runner
+Exec=/usr/libexec/k-ai-krunner

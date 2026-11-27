@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Video Converter for DaVinci Resolve Free Linux
+# Transcodes H.264/HEVC/AAC footage into DNxHR HQ (.mov) + PCM s16le WAV audio,
+# matching DaVinci Resolve Free Linux's supported open/pro editing codecs.
+
+DRY_RUN=0
+CHECK_ONLY=0
+FORCE=0
+INPUTS=()
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-resolve-convert [OPTIONS] [--] <VIDEO_FILE> [VIDEO_FILE...]
+
+Converts input videos to <dir>/<stem>_resolve.mov using:
+  -c:v dnxhd -profile:v dnxhr_hq -pix_fmt yuv422p -c:a pcm_s16le
+
+Options:
+  --dry-run, -n   Validate inputs/collisions and print ffmpeg command(s) without encoding.
+  --check         Verify ffmpeg/argument readiness safely (also works standalone).
+  --force, -f     Overwrite existing *_resolve.mov output files if already present.
+  -h, --help      Show this help message.
+EOF
+}
+
+compute_output_path() {
+    local input="$1"
+    local dir base stem
+    dir="$(dirname -- "$input")"
+    base="$(basename -- "$input")"
+
+    # Preserve dotfiles with no extension (e.g. ".clip" -> ".clip_resolve.mov")
+    if [[ "$base" == .* ]] && [[ "${base#.}" != *.* ]]; then
+        stem="$base"
+    elif [[ "$base" == *.* ]]; then
+        stem="${base%.*}"
+    else
+        stem="$base"
+    fi
+
+    printf '%s/%s_resolve.mov\n' "$dir" "$stem"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run|-n)
+            DRY_RUN=1
+            shift
+            ;;
+        --check)
+            CHECK_ONLY=1
+            DRY_RUN=1
+            shift
+            ;;
+        --force|-f)
+            FORCE=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            while [ $# -gt 0 ]; do
+                INPUTS+=("$1")
+                shift
+            done
+            break
+            ;;
+        -*)
+            echo "[FAIL] Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+        *)
+            INPUTS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+HAS_FFMPEG=0
+if command -v ffmpeg >/dev/null 2>&1; then
+    HAS_FFMPEG=1
+fi
+
+if [ "${#INPUTS[@]}" -eq 0 ]; then
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+        echo "=== Kushagra Resolve Converter Check ==="
+        if [ "$HAS_FFMPEG" -eq 1 ]; then
+            echo "[PASS] ffmpeg found: $(command -v ffmpeg)"
+        else
+            echo "[WARN] ffmpeg not found in PATH."
+        fi
+        echo "Codec Profile: -c:v dnxhd -profile:v dnxhr_hq -pix_fmt yuv422p -c:a pcm_s16le"
+        exit 0
+    fi
+    echo "[FAIL] No input video file(s) provided." >&2
+    usage >&2
+    exit 1
+fi
+
+if [ "$HAS_FFMPEG" -eq 0 ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[WARN] 'ffmpeg' binary not found in PATH (continuing dry-run command verification)."
+    else
+        echo "[FAIL] 'ffmpeg' command not found. Ensure the 'ffmpeg' package is installed." >&2
+        exit 1
+    fi
+fi
+
+# Pre-validate all inputs and output collisions before starting conversion
+OUTPUTS=()
+validation_failed=0
+for input in "${INPUTS[@]}"; do
+    if [ -z "$input" ]; then
+        echo "[FAIL] Empty input file path rejected." >&2
+        validation_failed=1
+        continue
+    fi
+    if [ ! -e "$input" ]; then
+        echo "[FAIL] Input video does not exist: ${input}" >&2
+        validation_failed=1
+        continue
+    fi
+    if [ -d "$input" ]; then
+        echo "[FAIL] Input path is a directory, expected a video file: ${input}" >&2
+        validation_failed=1
+        continue
+    fi
+    if [ ! -f "$input" ] || [ ! -r "$input" ]; then
+        echo "[FAIL] Input video is not a readable regular file: ${input}" >&2
+        validation_failed=1
+        continue
+    fi
+
+    out="$(compute_output_path "$input")"
+    if [ -e "$out" ] && [ "$FORCE" -ne 1 ]; then
+        echo "[FAIL] Output file already exists (pass --force to overwrite): ${out}" >&2
+        validation_failed=1
+        continue
+    fi
+    OUTPUTS+=("$out")
+done
+
+if [ "$validation_failed" -ne 0 ]; then
+    exit 1
+fi
+
+overwrite_flag="-n"
+if [ "$FORCE" -eq 1 ]; then
+    overwrite_flag="-y"
+fi
+
+echo "================================================================================"
+echo "           Kushagra OS DaVinci Resolve Converter (DNxHR HQ + PCM WAV)           "
+echo "================================================================================"
+
+converted=0
+failed=0
+idx=0
+
+for input in "${INPUTS[@]}"; do
+    out="${OUTPUTS[$idx]}"
+    idx=$((idx + 1))
+
+    cmd=(
+        ffmpeg
+        -hide_banner
+        "$overwrite_flag"
+        -i "$input"
+        -map 0:v:0
+        -map "0:a?"
+        -sn
+        -c:v dnxhd
+        -profile:v dnxhr_hq
+        -pix_fmt yuv422p
+        -c:a pcm_s16le
+        "$out"
+    )
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[DRY-RUN] Input : ${input}"
+        echo "[DRY-RUN] Output: ${out}"
+        printf '[DRY-RUN] Exec  :'
+        printf ' %q' "${cmd[@]}"
+        printf '\n'
+        converted=$((converted + 1))
+        continue
+    fi
+
+    echo ""
+    echo "--- Converting: ${input} -> ${out} ---"
+    existed_before=0
+    if [ -e "$out" ]; then
+        existed_before=1
+    fi
+
+    if "${cmd[@]}"; then
+        echo "[PASS] Created Resolve-ready media: ${out}"
+        converted=$((converted + 1))
+    else
+        echo "[FAIL] ffmpeg failed for: ${input}" >&2
+        if [ "$existed_before" -eq 0 ] && [ -f "$out" ]; then
+            rm -f -- "$out" || true
+        fi
+        failed=$((failed + 1))
+    fi
+done
+
+echo ""
+echo "Summary: Processed=${converted} | Failed=${failed}"
+
+if [ "$failed" -gt 0 ]; then
+    exit 1
+fi
+exit 0

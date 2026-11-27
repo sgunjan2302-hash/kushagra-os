@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Reboot to Windows
+GenericName=One-Time Dual-Boot Reboot
+Comment=Reboot once into Windows Boot Manager while keeping Kushagra OS as the default OS
+Exec=/usr/bin/kushagra-reboot-windows
+TryExec=/run/kushagra-windows-boot-available
+Icon=system-reboot
+Terminal=false
+Categories=System;
+Keywords=Windows;Reboot;Dual-Boot;BootNext;UEFI;
+StartupNotify=false

@@ -1,0 +1,14 @@
+[Unit]
+Description=Kushagra OS K-AI Lazy On-Demand Inference Supervisor
+Requires=k-ai-engine.socket
+After=k-ai-engine.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/k-ai-engine serve
+Restart=on-failure
+RestartSec=2s
+Slice=app.slice
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""Kushagra OS K-AI D-Bus KRunner Plugin (org.kde.krunner1 via Gio/GLib DBus).
+
+Service: org.kushagraos.KAI.Runner
+Object path: /KAI
+Interface: org.kde.krunner1
+
+Uses Gio.DBusConnection + GLib.Variant directly so D-Bus wire signatures
+`a(sssida{sv})` and `a(sss)` match KDE Plasma 6 KRunner strictly without QtDBus
+QVariantList (`av`) type mismatches.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+from typing import Any
+
+SERVICE_NAME = "org.kushagraos.KAI.Runner"
+OBJECT_PATH = "/KAI"
+INTERFACE_NAME = "org.kde.krunner1"
+
+PREFIX_RE = re.compile(r"^\s*(?:k-ai|ai)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+EXACT_TRIGGER_RE = re.compile(r"^\s*(?:k-ai|ai)\s*$", re.IGNORECASE)
+
+KRUNNER_NODE_XML = """<node>
+  <interface name="org.kde.krunner1">
+    <method name="Match">
+      <arg name="query" type="s" direction="in"/>
+      <arg name="matches" type="a(sssida{sv})" direction="out"/>
+    </method>
+    <method name="Actions">
+      <arg name="actions" type="a(sss)" direction="out"/>
+    </method>
+    <method name="Run">
+      <arg name="matchId" type="s" direction="in"/>
+      <arg name="actionId" type="s" direction="in"/>
+    </method>
+    <method name="Teardown"/>
+  </interface>
+</node>
+"""
+
+
+def _read_tier_summary() -> str:
+    """Best-effort fast read of K-AI hardware tier for KRunner subtext."""
+    detect_bin = "/usr/bin/k-ai-detect"
+    if not os.path.exists(detect_bin):
+        detect_bin = shutil.which("k-ai-detect") or ""
+    if not detect_bin:
+        return "Open K-AI Wayland Side Drawer"
+    try:
+        res = subprocess.run(
+            [detect_bin, "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            data = json.loads(res.stdout)
+            tier = data.get("tier")
+            tier_name = data.get("tier_name") or data.get("tier_label") or data.get("label") or ""
+            label = f"Tier {tier} ({tier_name})" if tier and tier_name else (tier_name or str(tier or ""))
+            model = data.get("recommended_model") or data.get("model") or ""
+            if label and model:
+                return f"{label} • {model}"
+            if label:
+                return str(label)
+    except Exception:
+        pass
+    return "Open K-AI Wayland Side Drawer"
+
+
+def build_matches(query: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Build KRunner match definitions for `ai ...` / `k-ai ...` queries.
+
+    Returns (matches_metadata_list, prompt_lookup_map).
+    """
+    stripped = query.strip()
+    if not stripped:
+        return [], {}
+
+    # Require either exact 'ai'/'k-ai' or 'ai <prompt>' / 'k-ai <prompt>'
+    match_exact = EXACT_TRIGGER_RE.match(query)
+    if match_exact:
+        prompt = ""
+    else:
+        lower = query.lstrip().lower()
+        if not (lower.startswith("ai ") or lower.startswith("k-ai ")):
+            return [], {}
+        m = PREFIX_RE.match(query)
+        prompt = (m.group(1) or "").strip() if m else ""
+
+    matches: list[dict[str, Any]] = []
+    prompts: dict[str, str] = {}
+    icon_logo = "/usr/share/kushagra-os/branding/logo-symbol.svg"
+    if not os.path.exists(icon_logo):
+        icon_logo = "assistant"
+
+    prompt_lower = prompt.lower()
+
+    if prompt:
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        mid = f"kai_prompt:{digest}"
+        prompts[mid] = prompt
+        preview = prompt if len(prompt) <= 72 else prompt[:69] + "..."
+        is_direct_shortcut = prompt_lower in ("ocr", "screen", "read screen", "tier", "status")
+        matches.append(
+            {
+                "id": mid,
+                "text": f"Ask K-AI: {preview}",
+                "icon": icon_logo,
+                "type": 70 if is_direct_shortcut else 100,
+                "relevance": 0.75 if is_direct_shortcut else 1.0,
+                "properties": {"subtext": "Open K-AI Side Drawer with this prompt"},
+            }
+        )
+    else:
+        matches.append(
+            {
+                "id": "kai_open_drawer",
+                "text": "Open K-AI Assistant Drawer",
+                "icon": icon_logo,
+                "type": 100,
+                "relevance": 0.95,
+                "properties": {"subtext": _read_tier_summary()},
+            }
+        )
+
+    if not prompt or any(k in prompt_lower for k in ("ocr", "screen", "read", "text", "capture")):
+        matches.append(
+            {
+                "id": "kai_run_ocr",
+                "text": "K-AI Read Screen (OCR)",
+                "icon": "scanner",
+                "type": 100 if prompt_lower in ("ocr", "screen", "read screen") else 70,
+                "relevance": 1.0 if prompt_lower in ("ocr", "screen", "read screen") else 0.75,
+                "properties": {"subtext": "On-demand Eng+Hin screen OCR -> clipboard (zero storage)"},
+            }
+        )
+
+    if not prompt or any(k in prompt_lower for k in ("tier", "status", "health", "model", "ram")):
+        matches.append(
+            {
+                "id": "kai_open_status",
+                "text": "K-AI Model Tier & Engine Status",
+                "icon": "computer",
+                "type": 100 if prompt_lower in ("tier", "status") else 70,
+                "relevance": 1.0 if prompt_lower in ("tier", "status") else 0.70,
+                "properties": {"subtext": _read_tier_summary()},
+            }
+        )
+
+    return matches, prompts
+
+
+def build_actions() -> list[tuple[str, str, str]]:
+    """Return fixed secondary KRunner actions matching signature a(sss)."""
+    return [
+        ("ocr", "Read Screen (OCR)", "scanner"),
+        ("followalong", "K-AI FollowAlong", "edit-select-all"),
+    ]
+
+
+def _spawn_detached(argv: list[str]) -> None:
+    """Spawn helper executable cleanly without shell or blocking event loop."""
+    try:
+        subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        print(f"k-ai-krunner spawn error for {argv}: {exc}", file=sys.stderr)
+
+
+def _resolve_bin(name: str, fallback_dir: str = "/usr/bin") -> str:
+    candidate = os.path.join(fallback_dir, name)
+    if os.path.exists(candidate):
+        return candidate
+    return shutil.which(name) or candidate
+
+
+def _to_glib_variant(glib_mod: Any, value: Any) -> Any:
+    """Wrap scalar/list KRunner match properties strictly as GLib.Variant values."""
+    if isinstance(value, glib_mod.Variant):
+        return value
+    if isinstance(value, bool):
+        return glib_mod.Variant("b", value)
+    if isinstance(value, int):
+        return glib_mod.Variant("i", value)
+    if isinstance(value, float):
+        return glib_mod.Variant("d", value)
+    if isinstance(value, (list, tuple)):
+        return glib_mod.Variant("as", [str(item) for item in value])
+    return glib_mod.Variant("s", str(value))
+
+
+def encode_matches_variant(glib_mod: Any, matches: list[dict[str, Any]]) -> Any:
+    """Encode match dictionaries into strict `(a(sssida{sv}))` GLib.Variant."""
+    wire_items = [
+        (
+            str(item["id"]),
+            str(item["text"]),
+            str(item["icon"]),
+            int(item["type"]),
+            float(item["relevance"]),
+            {
+                str(k): _to_glib_variant(glib_mod, v)
+                for k, v in dict(item.get("properties", {})).items()
+            },
+        )
+        for item in matches
+    ]
+    return glib_mod.Variant("(a(sssida{sv}))", (wire_items,))
+
+
+def encode_actions_variant(glib_mod: Any, actions: list[tuple[str, str, str]]) -> Any:
+    """Encode action tuples into strict `(a(sss))` GLib.Variant."""
+    wire_actions = [(str(aid), str(text), str(icon)) for aid, text, icon in actions]
+    return glib_mod.Variant("(a(sss))", (wire_actions,))
+
+
+class KAIRunnerState:
+    """Holds prompt state and dispatches KRunner Run/Teardown actions."""
+
+    def __init__(self) -> None:
+        self.pending_prompts: dict[str, str] = {}
+
+    def match(self, query: str) -> list[dict[str, Any]]:
+        matches, prompts = build_matches(query)
+        if prompts:
+            if len(self.pending_prompts) > 64:
+                self.pending_prompts.clear()
+            self.pending_prompts.update(prompts)
+        return matches
+
+    def run(self, match_id: str, action_id: str) -> None:
+        if action_id == "ocr" or match_id == "kai_run_ocr":
+            _spawn_detached([_resolve_bin("k-ai-ocr")])
+            return
+
+        if action_id == "followalong":
+            _spawn_detached([_resolve_bin("k-ai-followalong")])
+            return
+
+        drawer = _resolve_bin("k-ai-drawer")
+        if match_id in self.pending_prompts:
+            prompt = self.pending_prompts.get(match_id, "")
+            if prompt:
+                _spawn_detached([drawer, "--prompt", prompt])
+                return
+
+        if match_id == "kai_open_status":
+            _spawn_detached([drawer, "--prompt", "/health"])
+            return
+
+        _spawn_detached([drawer])
+
+    def teardown(self) -> None:
+        self.pending_prompts.clear()
+
+
+def serve_dbus() -> int:
+    """Run Gio D-Bus service exposing org.kde.krunner1 on /KAI."""
+    try:
+        from gi.repository import Gio, GLib
+    except ImportError as exc:
+        print(
+            f"k-ai-krunner: python3-gobject (gi.repository.Gio/GLib) missing: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    node_info = Gio.DBusNodeInfo.new_for_xml(KRUNNER_NODE_XML)
+    iface_info = node_info.lookup_interface(INTERFACE_NAME)
+    if iface_info is None:
+        print(f"k-ai-krunner: Interface {INTERFACE_NAME} missing in node XML", file=sys.stderr)
+        return 1
+
+    state = KAIRunnerState()
+    loop = GLib.MainLoop()
+    status = {"acquired": False, "rc": 0, "reg_id": 0}
+
+    def handle_method_call(
+        _connection: Any,
+        _sender: str,
+        _object_path: str,
+        _interface_name: str,
+        method_name: str,
+        parameters: Any,
+        invocation: Any,
+    ) -> None:
+        try:
+            if method_name == "Match":
+                (query,) = parameters.unpack()
+                matches = state.match(str(query))
+                invocation.return_value(encode_matches_variant(GLib, matches))
+            elif method_name == "Actions":
+                invocation.return_value(encode_actions_variant(GLib, build_actions()))
+            elif method_name == "Run":
+                match_id, action_id = parameters.unpack()
+                state.run(str(match_id), str(action_id))
+                invocation.return_value(None)
+            elif method_name == "Teardown":
+                state.teardown()
+                invocation.return_value(None)
+            else:
+                invocation.return_dbus_error(
+                    "org.freedesktop.DBus.Error.UnknownMethod",
+                    f"Unknown method: {method_name}",
+                )
+        except Exception as exc:
+            invocation.return_dbus_error(
+                "org.freedesktop.DBus.Error.Failed",
+                f"k-ai-krunner {method_name} error: {exc}",
+            )
+
+    def on_bus_acquired(connection: Any, _name: str) -> None:
+        try:
+            status["reg_id"] = connection.register_object(
+                OBJECT_PATH,
+                iface_info,
+                handle_method_call,
+                None,
+                None,
+            )
+        except Exception as exc:
+            print(f"k-ai-krunner: Failed to register object {OBJECT_PATH}: {exc}", file=sys.stderr)
+            status["rc"] = 1
+            loop.quit()
+
+    def on_name_acquired(_connection: Any, _name: str) -> None:
+        status["acquired"] = True
+
+    def on_name_lost(_connection: Any, _name: str) -> None:
+        if not status["acquired"]:
+            print(f"k-ai-krunner: Unable to acquire session D-Bus name {SERVICE_NAME}", file=sys.stderr)
+            status["rc"] = 1
+        loop.quit()
+
+    owner_id = Gio.bus_own_name(
+        Gio.BusType.SESSION,
+        SERVICE_NAME,
+        Gio.BusNameOwnerFlags.NONE,
+        on_bus_acquired,
+        on_name_acquired,
+        on_name_lost,
+    )
+
+    for sig_name in ("SIGINT", "SIGTERM", "SIGHUP"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None and hasattr(GLib, "unix_signal_add"):
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda *_: (loop.quit(), False)[1])
+
+    try:
+        loop.run()
+    finally:
+        Gio.bus_unown_name(owner_id)
+
+    return status["rc"]
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="k-ai-krunner",
+        description="K-AI D-Bus KRunner provider (org.kde.krunner1).",
+    )
+    parser.add_argument(
+        "--test-match",
+        default="",
+        help="Dry-run match generation for a query string and print JSON without D-Bus.",
+    )
+    parser.add_argument(
+        "--test-actions",
+        action="store_true",
+        help="Dry-run KRunner secondary actions output as JSON without D-Bus.",
+    )
+    return parser.parse_args(argv)
+
+
+def main() -> int:
+    args = parse_args(sys.argv[1:])
+    if args.test_match:
+        matches, _prompts = build_matches(args.test_match)
+        print(json.dumps(matches, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.test_actions:
+        actions = [
+            {"id": aid, "text": text, "icon": icon}
+            for aid, text, icon in build_actions()
+        ]
+        print(json.dumps(actions, ensure_ascii=False, indent=2))
+        return 0
+
+    return serve_dbus()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

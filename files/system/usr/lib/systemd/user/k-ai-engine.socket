@@ -1,0 +1,11 @@
+[Unit]
+Description=Kushagra OS K-AI Lazy Inference Socket (127.0.0.1:11435)
+Documentation=https://github.com/kushagra-os
+
+[Socket]
+ListenStream=127.0.0.1:11435
+Accept=no
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

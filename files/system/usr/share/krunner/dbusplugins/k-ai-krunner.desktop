@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=K-AI Assistant
+Comment=Ask Kushagra K-AI (`ai ...` or `k-ai ...`), inspect hardware tier, or read screen OCR
+Icon=/usr/share/kushagra-os/branding/logo-symbol.svg
+Type=Service
+X-KDE-ServiceTypes=Plasma/Runner
+X-Plasma-API=DBus
+X-Plasma-DBusRunner-Service=org.kushagraos.KAI.Runner
+X-Plasma-DBusRunner-Path=/KAI
+X-KDE-PluginInfo-Name=k-ai-krunner
+X-KDE-PluginInfo-EnabledByDefault=true
+X-Plasma-Runner-Min-Letter-Count=2
+X-Plasma-Runner-Match-Regex=^(?:[Kk]-[Aa][Ii]|[Aa][Ii])(?:\s+.*)?$

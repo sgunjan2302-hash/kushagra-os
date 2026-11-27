@@ -1,0 +1,545 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - DaVinci Resolve Hardware & License Preflight + Davincibox Setup
+# Rule #10 Compliance: NEVER bundles Blackmagic proprietary DaVinci Resolve binaries.
+# Performs honest GPU/VRAM/CUDA/ROCm preflight BEFORE downloading ghcr.io/zelikos/davincibox:latest.
+
+DAVINCIBOX_IMAGE="ghcr.io/zelikos/davincibox:latest"
+BOX_NAME="davincibox"
+MODE="setup"
+FORCE=0
+DRY_RUN=0
+INSTALLER_PATH=""
+STAGING_DIR=""
+
+cleanup() {
+    if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
+        rm -rf -- "$STAGING_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-resolve-setup [OPTIONS] [INSTALLER_ZIP_OR_RUN]
+
+Options:
+  --check, check              Run hardware, VRAM, GPU compute & tool preflight report only.
+  --dry-run, -n               Run preflight and show planned davincibox steps without downloading.
+  --installer <PATH>, -i      Path to official Blackmagic DaVinci Resolve Linux .zip or .run file.
+  --name <BOX_NAME>           Distrobox container name (default: davincibox).
+  --force                     Override Intel iGPU / llvmpipe / <= 4.5 GB AMD Polaris blocks.
+  status                      Check whether davincibox container is already provisioned.
+  enter                       Enter an existing davincibox container.
+  -h, --help, help            Show this help message.
+
+Notes:
+  - Kushagra OS NEVER bundles proprietary Blackmagic Design binaries.
+  - Download the official Linux archive from:
+      https://www.blackmagicdesign.com/products/davinciresolve
+  - DaVinci Resolve Free on Linux does NOT decode/encode H.264, H.265/HEVC, or AAC audio.
+    Use Dolphin right-click -> "Convert for DaVinci Resolve (DNxHR + WAV)"
+    (or run 'kushagra-resolve-convert <video>') before importing footage.
+EOF
+}
+
+is_live_session() {
+    grep -qw "rd.live.image" /proc/cmdline 2>/dev/null
+}
+
+print_codec_and_license_notice() {
+    echo "--------------------------------------------------------------------------------"
+    echo "Blackmagic License & Free Linux Codec Notice:"
+    echo "  1. Proprietary binaries are NOT bundled with Kushagra OS (Rule #10)."
+    echo "     Download DaVinci Resolve for Linux yourself from Blackmagic Design:"
+    echo "       https://www.blackmagicdesign.com/products/davinciresolve"
+    echo "  2. DaVinci Resolve FREE on Linux lacks H.264, H.265/HEVC, and AAC codecs."
+    echo "     Convert phone/camera clips to DNxHR HQ + PCM WAV via:"
+    echo "       - Dolphin right-click -> 'Convert for DaVinci Resolve (DNxHR + WAV)'"
+    echo "       - CLI: kushagra-resolve-convert <input-video>"
+    echo "--------------------------------------------------------------------------------"
+}
+
+run_preflight() {
+    local has_nvidia=0
+    local nvidia_smi_ok=0
+    local has_amd=0
+    local has_intel=0
+    local has_vm_gpu=0
+    local has_llvmpipe=0
+    local has_polaris=0
+    local amd_low_vram=0
+    local amd_vram_checked=0
+    local amd_max_vram_mib=0
+    local preflight_blocked=0
+    local block_reasons=()
+
+    echo "=== Kushagra OS DaVinci Resolve Hardware & License Preflight ==="
+
+    if is_live_session; then
+        echo "[WARN] LiveCD session detected (rd.live.image): persistent davincibox setup is disabled."
+        preflight_blocked=1
+        block_reasons+=("LiveCD session active (install Kushagra OS to disk first)")
+    fi
+
+    # 1. Inspect PCI display devices via lspci (if available) and sysfs fallback
+    local lspci_gpus=""
+    if command -v lspci >/dev/null 2>&1; then
+        lspci_gpus="$(lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' || true)"
+    fi
+
+    if [ -n "$lspci_gpus" ]; then
+        echo "Detected GPU(s) via lspci:"
+        printf '%s\n' "$lspci_gpus" | sed 's/^/  /'
+        if printf '%s\n' "$lspci_gpus" | grep -Eiq 'nvidia|\[10de:'; then
+            has_nvidia=1
+        fi
+        if printf '%s\n' "$lspci_gpus" | grep -Eiq 'amd/ati|radeon|advanced micro devices|\[1002:'; then
+            has_amd=1
+        fi
+        if printf '%s\n' "$lspci_gpus" | grep -Eiq 'intel|\[8086:'; then
+            has_intel=1
+        fi
+        if printf '%s\n' "$lspci_gpus" | grep -Eiq 'virtio|qxl|vmware|bochs|red hat|1af4:|1234:1111|15ad:|1b36:'; then
+            has_vm_gpu=1
+        fi
+        if printf '%s\n' "$lspci_gpus" | grep -Eiq 'rx[[:space:]]*(460|470|480|550|560|570|580|590)|polaris|ellesmere|baffin|lexa|\[1002:(67df|67ef|67ff|6fdf|67c0|67ca)\]'; then
+            has_polaris=1
+        fi
+    else
+        echo "[INFO] 'lspci' not installed; inspecting /sys/class/drm directly."
+    fi
+
+    # Sysfs DRM inspection (vendor + AMD VRAM size)
+    local drm_card
+    for drm_card in /sys/class/drm/card[0-9]*/device; do
+        [ -d "$drm_card" ] || continue
+        local vendor_hex="" device_hex="" vram_file="" vram_bytes=0 vram_mib=0
+        if [ -r "${drm_card}/vendor" ]; then
+            vendor_hex="$(tr -d '[:space:]' < "${drm_card}/vendor" 2>/dev/null || true)"
+        fi
+        if [ -r "${drm_card}/device" ]; then
+            device_hex="$(tr -d '[:space:]' < "${drm_card}/device" 2>/dev/null || true)"
+        fi
+
+        case "${vendor_hex,,}" in
+            0x10de) has_nvidia=1 ;;
+            0x1002)
+                has_amd=1
+                case "${device_hex,,}" in
+                    0x67df|0x67ef|0x67ff|0x6fdf|0x67c0|0x67ca) has_polaris=1 ;;
+                esac
+                ;;
+            0x8086) has_intel=1 ;;
+            0x1af4|0x1234|0x15ad|0x1b36) has_vm_gpu=1 ;;
+        esac
+
+        vram_file="${drm_card}/mem_info_vram_total"
+        if [ -r "$vram_file" ]; then
+            vram_bytes="$(tr -dc '0-9' < "$vram_file" 2>/dev/null || echo 0)"
+            if [ -n "$vram_bytes" ] && [ "$vram_bytes" -gt 0 ] 2>/dev/null; then
+                vram_mib=$(( vram_bytes / 1048576 ))
+                echo "DRM VRAM (${drm_card}): ${vram_mib} MiB (${vram_bytes} bytes)"
+                if [ "${vendor_hex,,}" = "0x1002" ] || [ "$has_amd" -eq 1 ]; then
+                    amd_vram_checked=1
+                    if [ "$vram_mib" -gt "$amd_max_vram_mib" ]; then
+                        amd_max_vram_mib="$vram_mib"
+                    fi
+                fi
+            fi
+        fi
+    done
+
+    # 2. Check Vulkan / software llvmpipe
+    if command -v vulkaninfo >/dev/null 2>&1; then
+        local vk_summary=""
+        if command -v timeout >/dev/null 2>&1; then
+            vk_summary="$(timeout 5 vulkaninfo --summary 2>/dev/null || true)"
+        else
+            vk_summary="$(vulkaninfo --summary 2>/dev/null || true)"
+        fi
+        if [ -n "$vk_summary" ]; then
+            local vk_devs
+            vk_devs="$(printf '%s\n' "$vk_summary" | grep -E 'deviceName|driverName|deviceType' || true)"
+            if [ -n "$vk_devs" ]; then
+                echo "Vulkan summary:"
+                printf '%s\n' "$vk_devs" | head -n 12 | sed 's/^/  /'
+            fi
+            if printf '%s\n' "$vk_summary" | grep -Eiq 'llvmpipe|lavapipe|softpipe|PHYSICAL_DEVICE_TYPE_CPU'; then
+                has_llvmpipe=1
+            fi
+        fi
+    else
+        echo "[INFO] 'vulkaninfo' not found (optional diagnostic)."
+    fi
+
+    # 3. Check NVIDIA CUDA / driver state
+    if [ "$has_nvidia" -eq 1 ] || command -v nvidia-smi >/dev/null 2>&1; then
+        if command -v nvidia-smi >/dev/null 2>&1; then
+            local nv_out=""
+            nv_out="$(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || true)"
+            if [ -n "$nv_out" ]; then
+                has_nvidia=1
+                nvidia_smi_ok=1
+                echo "[PASS] NVIDIA CUDA GPU active (nvidia-smi):"
+                printf '%s\n' "$nv_out" | sed 's/^/  /'
+            else
+                echo "[WARN] NVIDIA GPU present, but 'nvidia-smi' failed to query proprietary driver."
+                preflight_blocked=1
+                block_reasons+=("NVIDIA proprietary driver / CUDA runtime is not active on host")
+            fi
+        else
+            echo "[WARN] NVIDIA GPU detected, but 'nvidia-smi' is not installed (proprietary driver + CUDA required)."
+            preflight_blocked=1
+            block_reasons+=("NVIDIA proprietary driver / nvidia-smi missing on host")
+        fi
+    fi
+
+    # 4. Check AMD ROCm OpenCL & VRAM guardrails (<= 4.5 GB / 4 GB Polaris block)
+    if [ "$has_amd" -eq 1 ]; then
+        if command -v rocminfo >/dev/null 2>&1; then
+            local rocm_agents=""
+            rocm_agents="$(rocminfo 2>/dev/null | grep -E 'Name:|Marketing Name:' | head -n 8 || true)"
+            if [ -n "$rocm_agents" ]; then
+                echo "Host rocminfo agents:"
+                printf '%s\n' "$rocm_agents" | sed 's/^/  /'
+            else
+                echo "[WARN] 'rocminfo' returned no ROCm GPU agents on host."
+            fi
+        else
+            echo "[INFO] 'rocminfo' not installed on host (davincibox supplies container-side ROCm OpenCL)."
+        fi
+
+        if [ -e /dev/kfd ]; then
+            echo "[PASS] Kernel AMD KFD device (/dev/kfd) present for ROCm OpenCL passthrough."
+        else
+            echo "[WARN] /dev/kfd not found on host; ROCm OpenCL compute may be unavailable inside container."
+        fi
+
+        # 4.5 GiB = 4608 MiB
+        if [ "$amd_vram_checked" -eq 1 ] && [ "$amd_max_vram_mib" -le 4608 ]; then
+            amd_low_vram=1
+            echo "[WARN] AMD Radeon VRAM is ${amd_max_vram_mib} MiB (<= 4.5 GB threshold)."
+        fi
+
+        if [ "$amd_low_vram" -eq 1 ] || { [ "$has_polaris" -eq 1 ] && [ "$amd_vram_checked" -eq 0 ]; }; then
+            echo "[BLOCKED] AMD 4 GB Polaris (RX 460/470/480/560/570/580/590) or <= 4.5 GB VRAM GPU detected."
+            echo "          DaVinci Resolve suffers severe Out-Of-VRAM crashes on 4 GB timelines."
+            preflight_blocked=1
+            block_reasons+=("AMD GPU has <= 4.5 GB VRAM / 4 GB Polaris (pass --force to override)")
+        elif [ "$has_polaris" -eq 1 ]; then
+            echo "[WARN] AMD Polaris (GCN 4, ${amd_max_vram_mib} MiB VRAM) detected: older Polaris cards may hit ROCm OpenCL quirks."
+        elif [ "$amd_vram_checked" -eq 1 ]; then
+            echo "[PASS] AMD Radeon VRAM (${amd_max_vram_mib} MiB) exceeds 4.5 GB minimum."
+        fi
+    fi
+
+    # 5. Intel iGPU-only & VM llvmpipe checks
+    if [ "$has_nvidia" -eq 0 ] && [ "$has_amd" -eq 0 ]; then
+        if [ "$has_llvmpipe" -eq 1 ] || [ "$has_vm_gpu" -eq 1 ]; then
+            echo "[BLOCKED] VM / software renderer (llvmpipe / virtual GPU) detected without NVIDIA CUDA or AMD ROCm."
+            echo "          DaVinci Resolve Linux fails cleanly / is unsupported on llvmpipe software rendering."
+            preflight_blocked=1
+            block_reasons+=("VM / llvmpipe GPU unsupported (requires NVIDIA CUDA or AMD ROCm OpenCL)")
+        elif [ "$has_intel" -eq 1 ]; then
+            echo "[BLOCKED] Intel iGPU only detected. DaVinci Resolve Linux does NOT support Intel integrated GPUs."
+            echo "          DaVinci Resolve requires an NVIDIA CUDA GPU or supported AMD ROCm OpenCL GPU (> 4.5 GB VRAM)."
+            preflight_blocked=1
+            block_reasons+=("Intel iGPU only is unsupported by DaVinci Resolve Linux")
+        else
+            echo "[BLOCKED] No supported discrete GPU (NVIDIA CUDA or AMD ROCm OpenCL) detected."
+            preflight_blocked=1
+            block_reasons+=("No NVIDIA CUDA or AMD ROCm GPU detected")
+        fi
+    elif [ "$nvidia_smi_ok" -eq 0 ] && [ "$has_amd" -eq 0 ] && [ "$has_llvmpipe" -eq 1 ]; then
+        echo "[BLOCKED] Software llvmpipe active with no functioning GPU compute driver."
+        preflight_blocked=1
+        block_reasons+=("No active GPU compute driver (llvmpipe fallback detected)")
+    fi
+
+    # 6. Check Podman & Distrobox & Zip tools
+    echo "Checking container prerequisites:"
+    local tool
+    for tool in podman distrobox; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            echo "  [PASS] ${tool}: $(command -v "$tool")"
+        else
+            echo "  [FAIL] ${tool}: NOT FOUND"
+            preflight_blocked=1
+            block_reasons+=("Missing required command: ${tool}")
+        fi
+    done
+
+    if command -v unzip >/dev/null 2>&1; then
+        echo "  [PASS] unzip: $(command -v unzip)"
+    elif command -v python3 >/dev/null 2>&1; then
+        echo "  [PASS] python3 zipfile fallback available"
+    else
+        echo "  [WARN] neither 'unzip' nor 'python3' found for .zip extraction"
+    fi
+
+    print_codec_and_license_notice
+
+    if [ "$preflight_blocked" -eq 0 ]; then
+        echo "PREFLIGHT_STATUS=PASS"
+    elif [ "$FORCE" -eq 1 ]; then
+        echo "PREFLIGHT_STATUS=WARN_FORCED (overridden with --force: ${block_reasons[*]})"
+    else
+        echo "PREFLIGHT_STATUS=BLOCKED"
+        printf '  Reason: %s\n' "${block_reasons[@]}"
+    fi
+
+    PREFLIGHT_GPU_NVIDIA="$nvidia_smi_ok"
+    PREFLIGHT_GPU_AMD="$has_amd"
+    PREFLIGHT_BLOCKED="$preflight_blocked"
+}
+
+validate_box_name() {
+    local name="$1"
+    if ! [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "[FAIL] Invalid container name '${name}'. Use letters, digits, '.', '_', '-'." >&2
+        exit 1
+    fi
+}
+
+cmd_status() {
+    echo "=== Kushagra OS DaVinci Resolve Container Status ==="
+    if ! command -v distrobox >/dev/null 2>&1; then
+        echo "[WARN] 'distrobox' is not installed."
+        return 0
+    fi
+    if distrobox list --no-color 2>/dev/null | grep -Eq "(^|[[:space:]]|\|)${BOX_NAME}([[:space:]]|\||$)"; then
+        echo "[PASS] Distrobox '${BOX_NAME}' is provisioned."
+        distrobox list --no-color 2>/dev/null | grep -E "NAME|${BOX_NAME}" || true
+    else
+        echo "[INFO] Distrobox '${BOX_NAME}' is not created yet."
+        echo "Run 'ujust setup-resolve --check' or pass your downloaded Blackmagic .zip installer."
+    fi
+}
+
+cmd_enter() {
+    if ! command -v distrobox >/dev/null 2>&1; then
+        echo "[FAIL] 'distrobox' command not found." >&2
+        exit 1
+    fi
+    exec distrobox enter "$BOX_NAME"
+}
+
+run_setup_workflow() {
+    PREFLIGHT_GPU_NVIDIA=0
+    PREFLIGHT_GPU_AMD=0
+    PREFLIGHT_BLOCKED=0
+
+    run_preflight
+
+    if [ "$MODE" = "check" ]; then
+        return 0
+    fi
+
+    if [ "$PREFLIGHT_BLOCKED" -ne 0 ] && [ "$FORCE" -ne 1 ]; then
+        echo "" >&2
+        echo "[ABORTED] Hardware/prerequisite preflight failed BEFORE downloading ${DAVINCIBOX_IMAGE}." >&2
+        echo "If you understand the stability/crash risks and still want to continue, re-run with --force." >&2
+        exit 1
+    fi
+
+    if [ "$(id -u)" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+        echo "[BLOCKED] Run 'kushagra-resolve-setup' as your regular desktop user (rootless Podman/Distrobox), not as root." >&2
+        exit 1
+    fi
+
+    local create_flags=("--image" "$DAVINCIBOX_IMAGE" "--name" "$BOX_NAME" "--yes")
+    if [ "$PREFLIGHT_GPU_NVIDIA" -eq 1 ]; then
+        create_flags+=("--nvidia")
+    elif [ "$PREFLIGHT_GPU_AMD" -eq 1 ] && [ -e /dev/kfd ]; then
+        create_flags+=("--additional-flags" "--device /dev/kfd --device /dev/dri --group-add keep-groups")
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo ""
+        echo "[DRY-RUN] Planned davincibox setup workflow:"
+        if [ -n "$INSTALLER_PATH" ]; then
+            if [ ! -f "$INSTALLER_PATH" ]; then
+                echo "[FAIL] Specified installer file does not exist: ${INSTALLER_PATH}" >&2
+                exit 1
+            fi
+            echo "  1. Extract/stage installer: ${INSTALLER_PATH} (--appimage-extract -> squashfs-root/AppRun)"
+        else
+            echo "  1. Require user-provided Blackmagic DaVinci_Resolve_*_Linux.zip (or .run)"
+        fi
+        printf '  2. distrobox create'
+        printf ' %q' "${create_flags[@]}"
+        printf '\n'
+        echo "  3. distrobox enter ${BOX_NAME} -- setup-davinci <staging>/squashfs-root/AppRun distrobox"
+        return 0
+    fi
+
+    if [ -z "$INSTALLER_PATH" ]; then
+        echo ""
+        echo "[INFO] Preflight checks passed. No Blackmagic installer archive was passed."
+        echo "Next steps (Rule #10 — no proprietary binaries bundled):"
+        echo "  1. Download DaVinci Resolve for Linux (.zip) from:"
+        echo "     https://www.blackmagicdesign.com/products/davinciresolve"
+        echo "  2. Run:"
+        echo "     /usr/libexec/kushagra-resolve-setup /path/to/DaVinci_Resolve_<version>_Linux.zip"
+        return 0
+    fi
+
+    if [ ! -f "$INSTALLER_PATH" ]; then
+        echo "[FAIL] Installer file not found: ${INSTALLER_PATH}" >&2
+        exit 1
+    fi
+
+    local abs_installer
+    abs_installer="$(readlink -f -- "$INSTALLER_PATH")"
+
+    local cache_base="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}"
+    mkdir -p "$cache_base"
+    STAGING_DIR="$(mktemp -d "${cache_base}/kushagra-resolve-staging.XXXXXX")"
+
+    local run_file=""
+    case "${abs_installer,,}" in
+        *.zip)
+            echo "[INFO] Extracting Blackmagic archive into ${STAGING_DIR}..."
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -q "$abs_installer" -d "$STAGING_DIR"
+            else
+                python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$abs_installer" "$STAGING_DIR"
+            fi
+            run_file="$(find "$STAGING_DIR" -maxdepth 3 -type f -name 'DaVinci_Resolve_*_Linux.run' -print -quit || true)"
+            if [ -z "$run_file" ]; then
+                run_file="$(find "$STAGING_DIR" -maxdepth 3 -type f -name '*.run' -print -quit || true)"
+            fi
+            ;;
+        *.run)
+            cp -- "$abs_installer" "${STAGING_DIR}/"
+            run_file="${STAGING_DIR}/$(basename -- "$abs_installer")"
+            ;;
+        *)
+            echo "[FAIL] Unsupported installer format (expected Blackmagic .zip or .run): ${INSTALLER_PATH}" >&2
+            exit 1
+            ;;
+    esac
+
+    if [ -z "$run_file" ] || [ ! -f "$run_file" ]; then
+        echo "[FAIL] Could not locate DaVinci Resolve .run installer inside ${INSTALLER_PATH}." >&2
+        exit 1
+    fi
+
+    echo "[INFO] Unpacking AppImage installer payload (--appimage-extract)..."
+    chmod +x "$run_file"
+    (
+        cd "$STAGING_DIR"
+        "$run_file" --appimage-extract
+    )
+
+    if [ ! -x "${STAGING_DIR}/squashfs-root/AppRun" ]; then
+        echo "[FAIL] Expected ${STAGING_DIR}/squashfs-root/AppRun after extraction." >&2
+        exit 1
+    fi
+
+    if distrobox list --no-color 2>/dev/null | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' | grep -Fxq "$BOX_NAME"; then
+        echo "[INFO] Reusing existing Distrobox container '${BOX_NAME}'."
+    else
+        echo "[INFO] Creating Distrobox '${BOX_NAME}' from ${DAVINCIBOX_IMAGE}..."
+        distrobox create "${create_flags[@]}"
+    fi
+
+    echo "[INFO] Running setup-davinci inside '${BOX_NAME}'..."
+    distrobox enter "$BOX_NAME" -- setup-davinci "${STAGING_DIR}/squashfs-root/AppRun" distrobox
+    echo "[PASS] DaVinci Resolve setup completed cleanly inside Distrobox '${BOX_NAME}'."
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check)
+            MODE="check"
+            shift
+            ;;
+        --dry-run|-n)
+            DRY_RUN=1
+            shift
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        --installer|-i)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+                echo "[FAIL] --installer requires a file path." >&2
+                exit 1
+            fi
+            INSTALLER_PATH="$2"
+            shift 2
+            ;;
+        --name)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+                echo "[FAIL] --name requires a container name." >&2
+                exit 1
+            fi
+            BOX_NAME="$2"
+            shift 2
+            ;;
+        check)
+            MODE="check"
+            shift
+            ;;
+        status)
+            MODE="status"
+            shift
+            ;;
+        enter)
+            MODE="enter"
+            shift
+            ;;
+        setup|install)
+            MODE="setup"
+            shift
+            ;;
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            if [ $# -gt 0 ]; then
+                INSTALLER_PATH="$1"
+                shift
+            fi
+            if [ $# -gt 0 ]; then
+                echo "[FAIL] Unexpected extra arguments: $*" >&2
+                exit 1
+            fi
+            break
+            ;;
+        -*)
+            echo "[FAIL] Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+        *)
+            if [ -n "$INSTALLER_PATH" ]; then
+                echo "[FAIL] Unexpected extra argument: $1" >&2
+                usage >&2
+                exit 1
+            fi
+            INSTALLER_PATH="$1"
+            shift
+            ;;
+    esac
+done
+
+validate_box_name "$BOX_NAME"
+
+case "$MODE" in
+    status)
+        cmd_status
+        ;;
+    enter)
+        cmd_enter
+        ;;
+    check|setup)
+        run_setup_workflow
+        ;;
+esac

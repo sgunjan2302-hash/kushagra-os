@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=K-AI FollowAlong
+GenericName=Quick Text AI Actions
+Comment=Translate, summarize, fix grammar, or explain highlighted text with K-AI (Ctrl+Shift+A)
+Exec=/usr/bin/k-ai-followalong
+Icon=/usr/share/kushagra-os/branding/logo-symbol.svg
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=ai;translate;summarize;grammar;explain;followalong;k-ai;
+NoDisplay=false
+StartupNotify=false

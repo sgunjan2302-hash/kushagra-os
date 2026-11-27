@@ -1,0 +1,96 @@
+{
+  "version": "1.0",
+  "actions": {
+    "kavach_dns": {
+      "description": "Toggle Kushagra Kavach Quad9 malware-blocking DNS or Indian captive-portal bypass.",
+      "cmd": "/usr/libexec/kushagra-kavach-dns",
+      "privileged": false,
+      "privileged_when_not": "status",
+      "args": {
+        "action": {
+          "type": "enum",
+          "values": [
+            "on",
+            "off",
+            "status"
+          ],
+          "required": true
+        }
+      }
+    },
+    "glass_toggle": {
+      "description": "Toggle Kushagra Glass desktop effect on, off, or check status.",
+      "cmd": "/usr/bin/kushagra-glass-toggle",
+      "privileged": false,
+      "args": {
+        "action": {
+          "type": "enum",
+          "values": [
+            "on",
+            "off",
+            "status"
+          ],
+          "required": true
+        }
+      }
+    },
+    "layout_switch": {
+      "description": "Switch KDE Plasma 6 desktop layout between classic (Familiar) and floating (Studio).",
+      "cmd": "/usr/bin/kushagra-layout-switch",
+      "privileged": false,
+      "args": {
+        "layout": {
+          "type": "enum",
+          "values": [
+            "classic",
+            "floating"
+          ],
+          "required": true
+        }
+      }
+    },
+    "kavach_scan": {
+      "description": "Run on-demand ClamAV malware scan on a file or directory inside the user's home directory.",
+      "cmd": "/usr/bin/kushagra-kavach-scan",
+      "privileged": false,
+      "args": {
+        "path": {
+          "type": "home_realpath",
+          "required": true
+        },
+        "offline": {
+          "type": "bool_optional",
+          "required": false
+        }
+      }
+    },
+    "resolve_convert": {
+      "description": "Transcode a media file inside the user's home directory for DaVinci Resolve compatibility.",
+      "cmd": "/usr/bin/kushagra-resolve-convert",
+      "privileged": false,
+      "args": {
+        "path": {
+          "type": "home_realpath",
+          "required": true
+        }
+      }
+    },
+    "health_report": {
+      "description": "Run the read-only Kushagra OS system health verification suite.",
+      "cmd": "/usr/bin/kushagra-health-check",
+      "privileged": false,
+      "args": {}
+    },
+    "reboot_windows": {
+      "description": "Reboot the system cleanly into the coexisting Windows Boot Manager entry.",
+      "cmd": "/usr/bin/kushagra-reboot-windows",
+      "privileged": true,
+      "args": {
+        "dry_run": {
+          "type": "bool_optional",
+          "required": false
+        }
+      }
+    }
+  }
+}
