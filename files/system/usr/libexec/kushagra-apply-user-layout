@@ -8,6 +8,46 @@ AUTOSTART_HOOK="${HOME}/.config/autostart/kushagra-firstboot-layout.desktop"
 # Always clean up any inherited LiveCD desktop shortcut on first login
 rm -f "${HOME}/Desktop/liveinst.desktop" 2>/dev/null || true
 
+# Seed default Fcitx5 profile and Welcome Center suppression cleanly if absent
+seed_user_defaults() {
+    if [ ! -f "${HOME}/.config/fcitx5/profile" ] && [ -f /etc/skel/.config/fcitx5/profile ]; then
+        mkdir -p "${HOME}/.config/fcitx5" || true
+        cp -f /etc/skel/.config/fcitx5/profile "${HOME}/.config/fcitx5/profile" || true
+    fi
+
+    if [ ! -f "${HOME}/.config/plasma-welcomerc" ] && [ -f /etc/skel/.config/plasma-welcomerc ]; then
+        mkdir -p "${HOME}/.config" || true
+        cp -f /etc/skel/.config/plasma-welcomerc "${HOME}/.config/plasma-welcomerc" || true
+    fi
+}
+
+# Reinforce Windows muscle-memory shortcuts & Welcome suppression non-fatally
+reinforce_shortcuts_and_welcome() {
+    if command -v kwriteconfig6 >/dev/null 2>&1; then
+        kwriteconfig6 --file plasma-welcomerc --group General --key ShouldShow false || true
+        kwriteconfig6 --file plasma-welcomerc --group General --key ShowUpdatePage false || true
+
+        # Preserve KWin Meta+T tiling editor and Meta+D Show Desktop defaults
+        kwriteconfig6 --file kglobalshortcutsrc --group kwin --key "Edit Tiles" "Meta+T,Meta+T,Toggle Tiles Editor" || true
+        kwriteconfig6 --file kglobalshortcutsrc --group kwin --key "Show Desktop" "Meta+D,Meta+D,Peek at Desktop" || true
+
+        # Preserve Clipboard history at mouse position (Meta+V)
+        kwriteconfig6 --file kglobalshortcutsrc --group plasmashell --key "show-on-mouse-pos" "Meta+V,Meta+V,Show Clipboard Items at Mouse Position" || true
+
+        # Windows muscle-memory app shortcuts
+        kwriteconfig6 --file kglobalshortcutsrc --group services --group org.kde.plasma-systemmonitor.desktop --key _launch "Ctrl+Shift+Esc" || true
+        kwriteconfig6 --file kglobalshortcutsrc --group services --group org.kde.konsole.desktop --key _launch "Ctrl+Alt+T" || true
+        kwriteconfig6 --file kglobalshortcutsrc --group services --group org.kde.dolphin.desktop --key _launch "Meta+E" || true
+        kwriteconfig6 --file kglobalshortcutsrc --group services --group org.kde.krunner.desktop --key _launch $'Alt+Space\tSearch' || true
+    fi
+
+    if [ -n "${QDBUS_BIN:-}" ]; then
+        "$QDBUS_BIN" org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+    fi
+}
+
+seed_user_defaults || true
+
 # Discover appropriate Qt6 DBus binary
 QDBUS_BIN=""
 for candidate in qdbus-qt6 /usr/lib64/qt6/bin/qdbus qdbus6 qdbus; do
@@ -24,18 +64,21 @@ fi
 
 # Wait up to 30 seconds for PlasmaShell DBus interface to become ready
 PLASMA_READY=false
-for _ in $(seq 1 30); do
+for _ in $(seq 1 120); do
     if "$QDBUS_BIN" org.kde.plasmashell /PlasmaShell >/dev/null 2>&1; then
         PLASMA_READY=true
         break
     fi
-    sleep 1
+    sleep 0.25
 done
 
 if [ "$PLASMA_READY" != "true" ]; then
     echo "ERROR: org.kde.plasmashell /PlasmaShell did not become ready in time; keeping ${AUTOSTART_HOOK} for retry." >&2
     exit 1
 fi
+
+# Reinforce user shortcuts non-fatally before applying desktop layout
+reinforce_shortcuts_and_welcome || true
 
 if [ ! -x /usr/bin/kushagra-layout-switch ]; then
     echo "ERROR: /usr/bin/kushagra-layout-switch not found or not executable." >&2

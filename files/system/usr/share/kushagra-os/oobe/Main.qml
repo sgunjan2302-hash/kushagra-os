@@ -11,6 +11,12 @@ Window {
     color: "#060913"
     title: "Kushagra OS Setup"
 
+    onClosing: function(close) {
+        if (!isPreviewMode && !root.setupDoneBanner) {
+            close.accepted = false
+        }
+    }
+
     property int currentStep: 0 // 0=Welcome, 1=Network, 2=Workspace, 3=Account
     property string selectedLanguage: "en_IN" // "en_IN" | "hi_IN"
     property string selectedWorkspace: "classic" // "classic" | "floating"

@@ -28,9 +28,19 @@ install:
     # --- Driverless Printing & Scanning (IPP Everywhere / eSCL) ---
     - ipp-usb
 
-    # --- LiveCD Initramfs & ISO Boot Support ---
+    # --- LiveCD Initramfs & Silent OEM Boot Splash ---
     - dracut-live
     - livesys-scripts
+    - plymouth
+    - plymouth-theme-spinner
+
+    # --- Kushagra Kavach Security Suite (Rule #8/#9: NO clamd daemon, NO clamav-data bloat) ---
+    - usbguard
+    - usbguard-selinux
+    - usbguard-dbus
+    - usbguard-notifier
+    - clamav
+    - clamav-freshclam
 
     # --- LiveCD Graphical Installer & Partition Management ---
     - anaconda-live

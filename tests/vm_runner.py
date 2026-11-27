@@ -8,7 +8,8 @@ import shutil
 from PIL import Image
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-raw_iso = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO_ROOT, "build", "v0.1.6", "KushagraOS-44.iso")
+raw_iso = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else os.path.join(REPO_ROOT, "build", "v0.1.6", "KushagraOS-44.iso")
+VERBOSE_GRUB = "--verbose" in sys.argv
 ISO_PATH = os.path.abspath(raw_iso)
 BUILD_DIR = os.path.dirname(ISO_PATH)
 QEMU_DIR = os.path.join(REPO_ROOT, "build", "qemu")
@@ -70,19 +71,20 @@ if proc.poll() is not None:
 
 print(f"QEMU running with PID: {proc.pid}")
 
-# Connect to QEMU monitor
+# Connect to QEMU monitor promptly (before 1s hidden GRUB expires when --verbose is used)
 s = None
-for attempt in range(10):
+for attempt in range(25):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(3.0)
+        s.settimeout(1.5)
         s.connect(("127.0.0.1", 4444))
-        time.sleep(0.5)
+        time.sleep(0.15)
         greeting = s.recv(4096).decode('utf-8', errors='ignore')
         print(f"Connected to QEMU Monitor:\n{greeting.strip()}")
         break
     except Exception:
-        time.sleep(1)
+        s = None
+        time.sleep(0.2)
 
 if not s:
     print("[WARN] Could not connect to QEMU monitor socket")
@@ -103,10 +105,25 @@ start_time = time.time()
 last_serial_pos = 0
 last_snap_time = 0
 snapshots_saved = []
+verbose_selected = False
 
 try:
     while time.time() - start_time < 150:
         elapsed = int(time.time() - start_time)
+        if VERBOSE_GRUB and not verbose_selected:
+            serial_so_far = ""
+            if os.path.exists(SERIAL_LOG):
+                try:
+                    serial_so_far = open(SERIAL_LOG, "r", encoding="utf-8", errors="ignore").read()
+                except Exception:
+                    pass
+            if "BdsDxe: starting" in serial_so_far or "GRUB" in serial_so_far or elapsed >= 1:
+                verbose_selected = True
+                send_monitor("sendkey esc")
+                time.sleep(0.25)
+                send_monitor("sendkey down")
+                time.sleep(0.2)
+                send_monitor("sendkey ret")
 
         # Check if QEMU died
         if proc.poll() is not None:

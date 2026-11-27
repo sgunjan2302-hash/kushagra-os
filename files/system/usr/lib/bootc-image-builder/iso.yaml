@@ -1,11 +1,15 @@
 label: "KushagraOS-44"
 grub2:
   default: "0"
-  timeout: 10
+  # Fedora 44 UEFI grubx64.efi lacks keystatus.mod (do NOT use keystatus --shift),
+  # and GNU GRUB 2.12 skips keyboard polling when timeout=0 so Esc cannot open the menu.
+  # Keeping timeout: 1 with set timeout_style=hidden (injected in .github/workflows/iso.yml)
+  # hides the boot menu cleanly while allowing Esc to open the troubleshooting entry.
+  timeout: 1
   entries:
-    - name: "Start Kushagra OS 44 (LiveCD Desktop)"
-      linux: "/images/pxeboot/vmlinuz console=tty0 console=ttyS0 quiet splash root=live:CDLABEL=KushagraOS-44 enforcing=0 rd.live.image"
+    - name: "Start Kushagra OS 44 (Install / Live)"
+      linux: "/images/pxeboot/vmlinuz quiet splash rhgb loglevel=3 systemd.show_status=false rd.systemd.show_status=auto rd.udev.log_level=3 udev.log_priority=3 vt.global_cursor_default=0 root=live:CDLABEL=KushagraOS-44 enforcing=0 rd.live.image"
       initrd: "/images/pxeboot/initrd.img"
-    - name: "Start Kushagra OS 44 (Safe Graphics / nomodeset)"
-      linux: "/images/pxeboot/vmlinuz console=tty0 console=ttyS0 nomodeset quiet splash root=live:CDLABEL=KushagraOS-44 enforcing=0 rd.live.image"
+    - name: "Start Kushagra OS 44 Live (Verbose / Troubleshooting)"
+      linux: "/images/pxeboot/vmlinuz console=tty0 console=ttyS0 nomodeset systemd.show_status=true root=live:CDLABEL=KushagraOS-44 enforcing=0 rd.live.image"
       initrd: "/images/pxeboot/initrd.img"

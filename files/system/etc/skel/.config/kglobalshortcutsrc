@@ -1,0 +1,18 @@
+[kwin]
+Edit Tiles=Meta+T,Meta+T,Toggle Tiles Editor
+Show Desktop=Meta+D,Meta+D,Peek at Desktop
+
+[plasmashell]
+show-on-mouse-pos=Meta+V,Meta+V,Show Clipboard Items at Mouse Position
+
+[services][org.kde.dolphin.desktop]
+_launch=Meta+E
+
+[services][org.kde.konsole.desktop]
+_launch=Ctrl+Alt+T
+
+[services][org.kde.krunner.desktop]
+_launch=Alt+Space\tSearch
+
+[services][org.kde.plasma-systemmonitor.desktop]
+_launch=Ctrl+Shift+Esc

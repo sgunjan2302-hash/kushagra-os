@@ -54,7 +54,12 @@ banned_patterns = {
     'rechunk:': '.github/workflows/build.yml',
     'GTK_IM_MODULE': 'files/system/etc/environment',
     'QT_IM_MODULE': 'files/system/etc/environment',
-    'DNSOverTLS=yes': 'files/system/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf'
+    'DNSOverTLS=yes': 'files/system/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf',
+    '9.9.9.10': 'files/system/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf',
+    '149.112.112.10': 'files/system/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf',
+    'clamav-data': 'recipes/packages.yml',
+    'clamd': 'recipes/packages.yml',
+    'usbguard.service': 'recipes/recipe.yml',
 }
 anti_failures = []
 for pattern, path in banned_patterns.items():
@@ -110,10 +115,33 @@ lf_targets = (
     + glob.glob('files/system/usr/share/kushagra-os/installer/*.py')
     + glob.glob('files/system/usr/share/kushagra-os/installer/*.qml')
     + glob.glob('files/system/usr/share/kushagra-os/winrun/*.py')
+    + glob.glob('files/system/usr/share/kushagra-os/apkrun/*.py')
     + [
         'files/system/usr/share/kushagra-os/livesys/livesys-session-extra',
         'files/system/usr/lib/systemd/system/kushagra-oobe.service',
+        'files/system/usr/lib/systemd/user/kushagra-installer.service',
+        'files/system/usr/lib/systemd/user/kushagra-oobe-ui.service',
         'files/system/usr/lib/tmpfiles.d/kushagra-oobe.conf',
+        'files/system/usr/lib/tmpfiles.d/kushagra-kavach.conf',
+        'files/system/usr/lib/bootc/kargs.d/10-kushagra-boot.toml',
+        'files/system/etc/plymouth/plymouthd.conf',
+        'files/system/etc/dracut.conf.d/plymouth-kms.conf',
+        'files/system/usr/share/plymouth/themes/kushagra/kushagra.plymouth',
+        'files/system/etc/xdg/kwinrc',
+        'files/system/etc/xdg/kglobalshortcutsrc',
+        'files/system/etc/xdg/kded6rc',
+        'files/system/etc/xdg/plasma-welcomerc',
+        'files/system/etc/xdg/autostart/org.kde.plasma-welcome.desktop',
+        'files/system/etc/skel/.config/kwinrc',
+        'files/system/etc/skel/.config/kglobalshortcutsrc',
+        'files/system/etc/skel/.config/fcitx5/profile',
+        'files/system/etc/skel/.config/plasma-welcomerc',
+        'files/system/etc/skel/.config/ksplashrc',
+        'files/system/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf',
+        'files/system/etc/systemd/system/usbguard.service.d/10-kushagra-safe.conf',
+        'files/system/etc/polkit-1/rules.d/50-kushagra-kavach.rules',
+        'files/system/usr/share/kio/servicemenus/kushagra-kavach-scan.desktop',
+        'files/system/usr/share/applications/kushagra-apkrun.desktop',
         'files/system/etc/anaconda/profile.d/kushagra-os.conf',
         'files/system/etc/xdg/mimeapps.list',
         'files/system/etc/issue.net',
@@ -140,17 +168,52 @@ if os.path.exists(just_file):
 else:
     record('60-custom.just Location', 'FAIL', f'Missing {just_file}')
 
-# 8. Validate Titanoboa iso.yaml Contract
+# 8. Validate Titanoboa iso.yaml Contract (Zero-Text Silent Boot + Safe Graphics Recovery)
 try:
     with open('files/system/usr/lib/bootc-image-builder/iso.yaml', 'r', encoding='utf-8') as fp:
         iso_cfg = yaml.safe_load(fp)
-    entries = iso_cfg.get('grub2', {}).get('entries', [])
+    grub2_cfg = iso_cfg.get('grub2', {})
+    entries = grub2_cfg.get('entries', [])
     valid_entries = all('name' in e and 'linux' in e and 'initrd' in e for e in entries)
     has_enforcing = all('enforcing=0' in e.get('linux', '') for e in entries)
-    if iso_cfg.get('label') and entries and valid_entries and has_enforcing:
-        record('Titanoboa iso.yaml Contract', 'PASS', f'Valid label "{iso_cfg.get("label")}" with {len(entries)} GRUB2 entries (enforcing=0 verified)')
+    entry0_linux = entries[0].get('linux', '') if len(entries) >= 1 else ''
+    entry1_linux = entries[1].get('linux', '') if len(entries) >= 2 else ''
+    silent_entry0 = (
+        grub2_cfg.get('timeout') in (0, 1)
+        and 'console=ttyS0' not in entry0_linux
+        and all(
+            tok in entry0_linux
+            for tok in [
+                'quiet',
+                'splash',
+                'rhgb',
+                'loglevel=3',
+                'systemd.show_status=false',
+                'rd.systemd.show_status=auto',
+                'rd.udev.log_level=3',
+                'udev.log_priority=3',
+                'vt.global_cursor_default=0',
+            ]
+        )
+    )
+    verbose_entry1 = (
+        'nomodeset' in entry1_linux
+        and 'console=tty0 console=ttyS0' in entry1_linux
+        and 'systemd.show_status=true' in entry1_linux
+    )
+    if iso_cfg.get('label') and len(entries) >= 2 and valid_entries and has_enforcing and silent_entry0 and verbose_entry1:
+        record(
+            'Titanoboa iso.yaml Contract',
+            'PASS',
+            f'Label "{iso_cfg.get("label")}" silent Entry 0 (no ttyS0) + Safe Graphics/Verbose Entry 1 verified',
+        )
     else:
-        record('Titanoboa iso.yaml Contract', 'FAIL', f'Invalid iso.yaml entries structure or missing enforcing=0: {entries}')
+        record(
+            'Titanoboa iso.yaml Contract',
+            'FAIL',
+            f'valid_entries={valid_entries}, has_enforcing={has_enforcing}, '
+            f'silent_entry0={silent_entry0}, verbose_entry1={verbose_entry1}',
+        )
 except Exception as e:
     record('Titanoboa iso.yaml Contract', 'FAIL', str(e))
 
@@ -160,33 +223,55 @@ try:
         pkgs_cfg = yaml.safe_load(f)
     install_pkgs = pkgs_cfg.get('install', {}).get('packages', [])
     has_dracut_live = 'dracut-live' in install_pkgs
+    has_plymouth_pkgs = 'plymouth' in install_pkgs and 'plymouth-theme-spinner' in install_pkgs
 
     has_live_conf = os.path.exists('files/system/etc/dracut.conf.d/livecd.conf')
+    has_kms_conf = os.path.exists('files/system/etc/dracut.conf.d/plymouth-kms.conf')
     conf_valid = False
+    kms_valid = False
     if has_live_conf:
         with open('files/system/etc/dracut.conf.d/livecd.conf', 'r', encoding='utf-8') as f:
             conf_text = f.read()
             conf_valid = 'dmsquash-live' in conf_text
+    if has_kms_conf:
+        with open('files/system/etc/dracut.conf.d/plymouth-kms.conf', 'r', encoding='utf-8') as f:
+            kms_text = f.read()
+            kms_valid = (
+                all(k in kms_text for k in ['plymouth', 'drm', 'amdgpu', 'i915', 'xe'])
+                and 'force_drivers' not in kms_text
+                and 'simpledrm' not in kms_text
+                and 'nvidia' not in kms_text
+            )
 
-    if has_dracut_live and conf_valid:
-        record('LiveCD Dracut Modules', 'PASS', 'dracut-live in packages.yml and dmsquash-live in livecd.conf')
+    if has_dracut_live and has_plymouth_pkgs and conf_valid and kms_valid:
+        record('LiveCD Dracut Modules', 'PASS', 'dracut-live, plymouth, spinner, dmsquash-live, and safe amdgpu/i915/xe KMS verified')
     else:
-        record('LiveCD Dracut Modules', 'FAIL', f'has_dracut_live={has_dracut_live}, conf_valid={conf_valid}')
+        record('LiveCD Dracut Modules', 'FAIL', f'has_dracut_live={has_dracut_live}, has_plymouth_pkgs={has_plymouth_pkgs}, conf_valid={conf_valid}, kms_valid={kms_valid}')
 except Exception as e:
     record('LiveCD Dracut Modules', 'FAIL', str(e))
 
-# 10. UEFI LiveCD Bootloader Hardening Contract
+# 10. UEFI LiveCD Bootloader Hardening & Silent GRUB Contract
 try:
     with open('.github/workflows/iso.yml', 'r', encoding='utf-8') as f:
         iso_workflow = f.read()
     has_grub_boot_stage = '/out/EFI/BOOT/grubx64.efi' in iso_workflow
     has_fb_purge = 'fbx64.efi' in iso_workflow and 'rm -vf' in iso_workflow
     has_tpm_unload = 'rmmod tpm' in iso_workflow
+    active_iso_lines = [ln.strip() for ln in iso_workflow.splitlines() if ln.strip() and not ln.strip().startswith('#')]
+    has_hidden_grub = (
+        'timeout_style=hidden' in iso_workflow
+        and not any(re.search(r'\bif\s+keystatus\b|"if keystatus\b', ln) for ln in active_iso_lines)
+    )
 
-    if has_grub_boot_stage and has_fb_purge and has_tpm_unload:
-        record('UEFI Bootloader Resilience', 'PASS', 'grubx64.efi staged in EFI/BOOT, fbx64.efi purged, and rmmod tpm injected')
+    if has_grub_boot_stage and has_fb_purge and has_tpm_unload and has_hidden_grub:
+        record('UEFI Bootloader Resilience', 'PASS', 'grubx64.efi staged, fbx64.efi purged, rmmod tpm & Esc-revealed hidden GRUB verified')
     else:
-        record('UEFI Bootloader Resilience', 'FAIL', f'has_grub_boot_stage={has_grub_boot_stage}, has_fb_purge={has_fb_purge}, has_tpm_unload={has_tpm_unload}')
+        record(
+            'UEFI Bootloader Resilience',
+            'FAIL',
+            f'has_grub_boot_stage={has_grub_boot_stage}, has_fb_purge={has_fb_purge}, '
+            f'has_tpm_unload={has_tpm_unload}, has_hidden_grub={has_hidden_grub}',
+        )
 except Exception as e:
     record('UEFI Bootloader Resilience', 'FAIL', str(e))
 
@@ -427,6 +512,8 @@ try:
     has_safety_locks = (
         'WIN_FSTYPES' in probe_txt
         and 'ESP_PARTTYPES' in probe_txt
+        and 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' in probe_txt
+        and 'c12a7328-f81f-11d2-ba4b-00a0c93ec3b3' not in probe_txt
         and 'MIN_ESP_FREE_MIB = 35' in probe_txt
         and 'detect_live_disk_paths' in probe_txt
         and 'os.path.basename' in probe_txt
@@ -446,8 +533,22 @@ try:
         and 'rmmod tpm' in ks_txt
         and 'load_video' in ks_txt
         and 'set gfxpayload=keep' in ks_txt
-        and 'rw rhgb quiet console=ttyS0 console=tty0' in ks_txt
-        and 'Verbose Logs' in ks_txt
+        and 'if keystatus --shift' not in ks_txt
+        and 'set timeout_style=${GRUB_STYLE}' in ks_txt
+        and 'set timeout=${GRUB_TIMEOUT}' in ks_txt
+        and 'GRUB_STYLE=hidden' in ks_txt
+        and 'GRUB_TIMEOUT=1' in ks_txt
+        and 'GRUB_STYLE=menu' in ks_txt
+        and 'GRUB_TIMEOUT=4' in ks_txt
+        and 'terminal_output console' not in ks_txt
+        and 'vt.global_cursor_default=0' in ks_txt
+        and 'systemd.show_status=false' in ks_txt
+        and 'rd.udev.log_level=3' in ks_txt
+        and 'rw console=tty0 console=ttyS0 systemd.show_status=true' in ks_txt
+        and 'Verbose / Debug Logs' in ks_txt
+        and 'bootmgfw.efi' in ks_txt
+        and 'Windows Boot Manager' in ks_txt
+        and 'chainloader ${WIN_EFI_REL}' in ks_txt
         and 'in (eng)' in ks_txt
         and 'graphical.target' in ks_txt
         and 'setfiles' in ks_txt
@@ -574,26 +675,250 @@ try:
         'find_existing_bottle' in winrun_py
         and 'flatpak install --system' in just_cfg
     )
-    has_v021_branding = (
-        'v0.2.1' in recipe_raw
+    has_v030_branding = (
+        'v0.3.0' in recipe_raw
         and 'v0.1 Prototype' not in recipe_raw
-        and 'v0.2.1' in issue_raw
+        and 'v0.3.0' in issue_raw
         and 'v0.1 Prototype' not in issue_raw
     )
 
-    if has_live_guards and has_app_fixes and has_v021_branding:
+    if has_live_guards and has_app_fixes and has_v030_branding:
         record(
-            'v0.2.1 LiveCD Guards & Branding Contract',
+            'v0.3.0 LiveCD Guards & Branding Contract',
             'PASS',
-            'LiveCD flatpak/bootloader guards, Bottles/system gaming fixes, and v0.2.1 branding verified',
+            'LiveCD flatpak/bootloader guards, Bottles/system gaming fixes, and v0.3.0 branding verified',
         )
     else:
         record(
-            'v0.2.1 LiveCD Guards & Branding Contract',
+            'v0.3.0 LiveCD Guards & Branding Contract',
             'FAIL',
-            f'has_live_guards={has_live_guards}, has_app_fixes={has_app_fixes}, has_v021_branding={has_v021_branding}',
+            f'has_live_guards={has_live_guards}, has_app_fixes={has_app_fixes}, has_v030_branding={has_v030_branding}',
         )
 except Exception as e:
-    record('v0.2.1 LiveCD Guards & Branding Contract', 'FAIL', str(e))
+    record('v0.3.0 LiveCD Guards & Branding Contract', 'FAIL', str(e))
+
+# 18. Zero-Text Silent OEM Boot, Kushagra Plymouth Theme & Flicker-Free Kiosk Handoff Contract
+try:
+    import tomllib
+
+    recipe_cfg = yaml.safe_load(open('recipes/recipe.yml', 'r', encoding='utf-8'))
+    modules = recipe_cfg.get('modules', [])
+    script_idx = next((i for i, m in enumerate(modules) if m.get('type') == 'script'), -1)
+    initramfs_idx = next((i for i, m in enumerate(modules) if m.get('type') == 'initramfs'), -1)
+    script_list = modules[script_idx].get('scripts', []) if script_idx >= 0 else []
+    has_plymouth_hook_order = (
+        0 <= script_idx < initramfs_idx
+        and '03-configure-plymouth-theme.sh' in script_list
+        and os.path.exists('files/scripts/03-configure-plymouth-theme.sh')
+    )
+
+    ply_conf = open('files/system/etc/plymouth/plymouthd.conf', 'r', encoding='utf-8').read()
+    ply_theme = open('files/system/usr/share/plymouth/themes/kushagra/kushagra.plymouth', 'r', encoding='utf-8').read()
+    has_plymouth_theme = (
+        'Theme=kushagra' in ply_conf
+        and 'UseSimpledrmNoLuks=1' in ply_conf
+        and 'ModuleName=two-step' in ply_theme
+        and 'UseFirmwareBackground=true' in ply_theme
+        and 'ImageDir=/usr/share/plymouth/themes/kushagra' in ply_theme
+        and os.path.exists('files/system/usr/share/plymouth/themes/kushagra/watermark.png')
+        and os.path.exists('files/system/usr/share/pixmaps/kushagra-logo.png')
+    )
+
+    kargs_toml = tomllib.loads(open('files/system/usr/lib/bootc/kargs.d/10-kushagra-boot.toml', 'r', encoding='utf-8').read())
+    kargs_list = kargs_toml.get('kargs', [])
+    has_bootc_kargs = (
+        all(k in kargs_list for k in ['quiet', 'splash', 'rhgb', 'loglevel=3', 'systemd.show_status=false', 'vt.global_cursor_default=0'])
+        and all('console=ttyS0' not in k for k in kargs_list)
+    )
+
+    livesys_txt = open('files/system/usr/share/kushagra-os/livesys/livesys-session-extra', 'r', encoding='utf-8').read()
+    inst_main = open('files/system/usr/share/kushagra-os/installer/main.py', 'r', encoding='utf-8').read()
+    inst_qml = open('files/system/usr/share/kushagra-os/installer/Main.qml', 'r', encoding='utf-8').read()
+    has_stage1_kiosk = (
+        os.path.exists('files/system/usr/lib/systemd/user/kushagra-installer.service')
+        and 'plasma-plasmashell.service' in livesys_txt
+        and 'plasma-ksplash.service' in livesys_txt
+        and 'plasma-wallpaper.service' in livesys_txt
+        and 'kushagra-installer.service' in livesys_txt
+        and 'setVisibility(QWindow.Visibility.Windowed)' not in inst_main
+        and 'RestoreDesktopWorker' in inst_main
+        and 'launchingDesktop' in inst_qml
+    )
+
+    tmpfiles_txt = open('files/system/usr/lib/tmpfiles.d/kushagra-oobe.conf', 'r', encoding='utf-8').read()
+    oobe_main = open('files/system/usr/share/kushagra-os/oobe/main.py', 'r', encoding='utf-8').read()
+    has_stage2_kiosk = (
+        os.path.exists('files/system/usr/lib/systemd/user/kushagra-oobe-ui.service')
+        and os.path.exists('files/system/etc/skel/.config/plasma-welcomerc')
+        and os.path.exists('files/system/etc/skel/.config/ksplashrc')
+        and 'plasma-ksplash.service' in tmpfiles_txt
+        and 'plasma-wallpaper.service' in tmpfiles_txt
+        and 'kushagra-oobe-ui.service' in tmpfiles_txt
+        and 'setVisibility(QWindow.Visibility.Windowed)' not in oobe_main
+        and 'SIGTERM' in oobe_main
+        and '_install_signal_handlers' in oobe_main
+    )
+
+    if has_plymouth_hook_order and has_plymouth_theme and has_bootc_kargs and has_stage1_kiosk and has_stage2_kiosk:
+        record(
+            'Zero-Text Silent OEM Boot & Kiosk Handoff Contract',
+            'PASS',
+            'Plymouth kushagra theme before initramfs, bootc kargs.d, Stage 1 & Stage 2 zero-flash kiosk verified',
+        )
+    else:
+        record(
+            'Zero-Text Silent OEM Boot & Kiosk Handoff Contract',
+            'FAIL',
+            f'has_plymouth_hook_order={has_plymouth_hook_order}, has_plymouth_theme={has_plymouth_theme}, '
+            f'has_bootc_kargs={has_bootc_kargs}, has_stage1_kiosk={has_stage1_kiosk}, has_stage2_kiosk={has_stage2_kiosk}',
+        )
+except Exception as e:
+    record('Zero-Text Silent OEM Boot & Kiosk Handoff Contract', 'FAIL', str(e))
+
+# 19. Plasma 6.8.3 Zero-Glitch UX, Windows Shortcuts & .apk Handler Contract
+try:
+    xdg_kwin = open('files/system/etc/xdg/kwinrc', 'r', encoding='utf-8').read()
+    skel_kwin = open('files/system/etc/skel/.config/kwinrc', 'r', encoding='utf-8').read()
+    livesys_v3 = open('files/system/usr/share/kushagra-os/livesys/livesys-session-extra', 'r', encoding='utf-8').read()
+    tmp_oobe_v3 = open('files/system/usr/lib/tmpfiles.d/kushagra-oobe.conf', 'r', encoding='utf-8').read()
+    fcitx_prof = open('files/system/etc/skel/.config/fcitx5/profile', 'r', encoding='utf-8').read()
+
+    has_ime_lock = all(
+        'InputMethod[$i]=/usr/share/applications/fcitx5-wayland-launcher.desktop' in txt
+        for txt in (xdg_kwin, skel_kwin, livesys_v3, tmp_oobe_v3)
+    ) and 'keyboard-in-eng' in fcitx_prof and 'm17n_hi_itrans' in fcitx_prof
+
+    welcome_autostart = open('files/system/etc/xdg/autostart/org.kde.plasma-welcome.desktop', 'r', encoding='utf-8').read()
+    kded6rc_txt = open('files/system/etc/xdg/kded6rc', 'r', encoding='utf-8').read()
+    xdg_welcome_rc = open('files/system/etc/xdg/plasma-welcomerc', 'r', encoding='utf-8').read()
+    skel_welcome_rc = open('files/system/etc/skel/.config/plasma-welcomerc', 'r', encoding='utf-8').read()
+    has_welcome_suppressed = (
+        'Hidden=true' in welcome_autostart
+        and '[Module-plasma_welcome]' in kded6rc_txt
+        and 'autoload=false' in kded6rc_txt
+        and 'ShouldShow=false' in xdg_welcome_rc
+        and 'ShouldShow=false' in skel_welcome_rc
+    )
+
+    xdg_sc = open('files/system/etc/xdg/kglobalshortcutsrc', 'r', encoding='utf-8').read()
+    skel_sc = open('files/system/etc/skel/.config/kglobalshortcutsrc', 'r', encoding='utf-8').read()
+    layout_apply_v3 = open('files/system/usr/libexec/kushagra-apply-user-layout', 'r', encoding='utf-8').read()
+    required_sc = [
+        'Edit Tiles=Meta+T',
+        'Show Desktop=Meta+D',
+        'show-on-mouse-pos=Meta+V',
+        'org.kde.plasma-systemmonitor.desktop',
+        'Ctrl+Shift+Esc',
+        'org.kde.konsole.desktop',
+        'Ctrl+Alt+T',
+        'org.kde.dolphin.desktop',
+        'Meta+E',
+        'org.kde.krunner.desktop',
+        'Alt+Space',
+    ]
+    has_shortcuts = (
+        all(tok in xdg_sc and tok in skel_sc for tok in required_sc)
+        and 'Edit Tiles' in layout_apply_v3
+        and 'Ctrl+Alt+T' in layout_apply_v3
+        and 'Ctrl+Shift+Esc' in layout_apply_v3
+    )
+
+    apk_py_path = 'files/system/usr/share/kushagra-os/apkrun/main.py'
+    ast.parse(open(apk_py_path, 'r', encoding='utf-8').read(), filename=apk_py_path)
+    apk_py = open(apk_py_path, 'r', encoding='utf-8').read()
+    apk_desk = open('files/system/usr/share/applications/kushagra-apkrun.desktop', 'r', encoding='utf-8').read()
+    mime_v3 = open('files/system/etc/xdg/mimeapps.list', 'r', encoding='utf-8').read()
+    has_apk = (
+        os.path.exists('files/system/usr/bin/kushagra-apkrun')
+        and 'rd.live.image' in apk_py
+        and 'REMOTE_SCHEMES' in apk_py
+        and 'waydroid app install' in apk_py
+        and 'MEETS_STRONG_INTEGRITY' in apk_py
+        and 'application/vnd.android.package-archive' in apk_desk
+        and 'application/vnd.android.package-archive=kushagra-apkrun.desktop' in mime_v3
+    )
+
+    if has_ime_lock and has_welcome_suppressed and has_shortcuts and has_apk:
+        record(
+            'Plasma 6.8.3 UX, Shortcuts & APK Contract',
+            'PASS',
+            'InputMethod[$i] lock, Welcome Center suppression, Edit Tiles=Meta+T + Ctrl+Alt+T + Win shortcuts, and kushagra-apkrun verified',
+        )
+    else:
+        record(
+            'Plasma 6.8.3 UX, Shortcuts & APK Contract',
+            'FAIL',
+            f'has_ime_lock={has_ime_lock}, has_welcome_suppressed={has_welcome_suppressed}, has_shortcuts={has_shortcuts}, has_apk={has_apk}',
+        )
+except Exception as e:
+    record('Plasma 6.8.3 UX, Shortcuts & APK Contract', 'FAIL', str(e))
+
+# 20. Kushagra Kavach Security Suite Contract (Rule #8/#9)
+try:
+    pkgs_cfg_v3 = yaml.safe_load(open('recipes/packages.yml', 'r', encoding='utf-8'))
+    pkgs_v3 = pkgs_cfg_v3.get('install', {}).get('packages', [])
+    recipe_cfg_v3 = yaml.safe_load(open('recipes/recipe.yml', 'r', encoding='utf-8'))
+    sys_enabled_v3 = next((m for m in recipe_cfg_v3.get('modules', []) if m.get('type') == 'systemd'), {}).get('system', {}).get('enabled', [])
+
+    resolved_txt = open('files/system/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf', 'r', encoding='utf-8').read()
+    resolved_active = [ln.strip() for ln in resolved_txt.splitlines() if ln.strip() and not ln.strip().startswith('#')]
+    has_quad9 = (
+        any(ln.startswith('DNS=') and '9.9.9.9#dns.quad9.net' in ln and '149.112.112.112#dns.quad9.net' in ln for ln in resolved_active)
+        and any(ln == 'DNSOverTLS=opportunistic' for ln in resolved_active)
+        and not any('.10' in ln or 'DNSOverTLS=yes' in ln for ln in resolved_active)
+        and os.path.exists('files/system/usr/libexec/kushagra-kavach-dns')
+    )
+
+    usb_safe_txt = open('files/system/etc/systemd/system/usbguard.service.d/10-kushagra-safe.conf', 'r', encoding='utf-8').read()
+    usb_setup_txt = open('files/system/usr/libexec/kushagra-usbguard-setup', 'r', encoding='utf-8').read()
+    polkit_kavach = open('files/system/etc/polkit-1/rules.d/50-kushagra-kavach.rules', 'r', encoding='utf-8').read()
+    has_usbguard_safe = (
+        all(p in pkgs_v3 for p in ['usbguard', 'usbguard-selinux', 'usbguard-dbus', 'usbguard-notifier'])
+        and 'usbguard.service' not in sys_enabled_v3
+        and 'ConditionKernelCommandLine=!rd.live.image' in usb_safe_txt
+        and 'ConditionFileNotEmpty=/etc/usbguard/rules.conf' in usb_safe_txt
+        and 'generate-policy' in usb_setup_txt
+        and 'read -r -t 15' in usb_setup_txt
+        and 'org.usbguard' in polkit_kavach
+    )
+
+    scan_sh = open('files/system/usr/bin/kushagra-kavach-scan', 'r', encoding='utf-8').read()
+    kio_desk = open('files/system/usr/share/kio/servicemenus/kushagra-kavach-scan.desktop', 'r', encoding='utf-8').read()
+    kavach_tmp = open('files/system/usr/lib/tmpfiles.d/kushagra-kavach.conf', 'r', encoding='utf-8').read()
+    tuning_v3 = open('files/scripts/02-system-tuning.sh', 'r', encoding='utf-8').read()
+    has_clamav_safe = (
+        'clamav' in pkgs_v3
+        and 'clamav-freshclam' in pkgs_v3
+        and 'clamav-data' not in pkgs_v3
+        and 'clamd' not in pkgs_v3
+        and 'freshclam' in scan_sh
+        and 'clamscan' in scan_sh
+        and 'Scan with Kushagra Kavach' in kio_desk
+        and '/var/lib/clamav' in kavach_tmp
+        and 'freshclam.conf' in tuning_v3
+    )
+
+    mirror_sh = open('files/system/usr/libexec/kushagra-lan-mirror', 'r', encoding='utf-8').read()
+    just_v3 = open('files/system/usr/share/ublue-os/just/60-custom.just', 'r', encoding='utf-8').read()
+    has_mirror_and_just = (
+        '90-kushagra-lan-mirror.conf' in mirror_sh
+        and 'digest-only' in mirror_sh
+        and all(r in just_v3 for r in ['kavach-dns', 'scan-path', 'setup-usbguard', 'setup-lan-mirror'])
+    )
+
+    if has_quad9 and has_usbguard_safe and has_clamav_safe and has_mirror_and_just:
+        record(
+            'Kushagra Kavach Security Suite Contract',
+            'PASS',
+            'Quad9 opportunistic DoT, HID-safe opt-in USBGuard, on-demand ClamAV (zero clamd), 90-kushagra-lan-mirror.conf & ujust verified',
+        )
+    else:
+        record(
+            'Kushagra Kavach Security Suite Contract',
+            'FAIL',
+            f'has_quad9={has_quad9}, has_usbguard_safe={has_usbguard_safe}, has_clamav_safe={has_clamav_safe}, has_mirror_and_just={has_mirror_and_just}',
+        )
+except Exception as e:
+    record('Kushagra Kavach Security Suite Contract', 'FAIL', str(e))
 
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)

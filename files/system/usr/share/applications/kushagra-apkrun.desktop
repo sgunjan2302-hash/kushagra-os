@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Kushagra Android APK Installer
+GenericName=Android APK Installer (Waydroid)
+Comment=Install Android .apk packages into Waydroid
+Exec=/usr/bin/kushagra-apkrun %f
+Icon=application-vnd.android.package-archive
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+InitialPreference=10
+MimeType=application/vnd.android.package-archive;

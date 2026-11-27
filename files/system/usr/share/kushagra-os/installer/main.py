@@ -3,8 +3,10 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QEventLoop, QObject, QSize, QThread, QTimer, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
@@ -132,6 +134,106 @@ class InstallWorker(QThread):
             self.finishedInstall.emit(False, f"Installer process error: {exc}")
 
 
+def _find_plasma_probe_cmd():
+    """Locate Qt6 qdbus or gdbus binary to probe org.kde.plasmashell /PlasmaShell."""
+    for candidate in ("qdbus-qt6", "/usr/lib64/qt6/bin/qdbus", "qdbus6", "qdbus"):
+        resolved = candidate if os.path.isabs(candidate) else shutil.which(candidate)
+        if resolved and os.access(resolved, os.X_OK):
+            return [resolved, "org.kde.plasmashell", "/PlasmaShell"], False
+    gdbus_bin = shutil.which("gdbus")
+    if gdbus_bin:
+        return [
+            gdbus_bin,
+            "introspect",
+            "--session",
+            "--dest",
+            "org.kde.plasmashell",
+            "--object-path",
+            "/PlasmaShell",
+        ], True
+    return None, False
+
+
+class RestoreDesktopWorker(QThread):
+    """Non-blocking LiveCD Plasma shell restoration before exiting K-Installer."""
+
+    finishedRestore = pyqtSignal(bool)
+
+    def __init__(self, launch_anaconda: bool = False, parent=None):
+        super().__init__(parent)
+        self.launch_anaconda = launch_anaconda
+
+    def run(self):
+        config_dir = Path.home() / ".config"
+
+        for mask_rel in (
+            Path("systemd") / "user" / "plasma-plasmashell.service",
+            Path("systemd") / "user" / "plasma-wallpaper.service",
+        ):
+            mask_path = config_dir / mask_rel
+            try:
+                if os.path.lexists(mask_path) and (
+                    (mask_path.is_symlink() and (os.readlink(mask_path) == "/dev/null" or os.path.realpath(mask_path) == "/dev/null"))
+                    or (mask_path.is_file() and mask_path.stat().st_size == 0)
+                ):
+                    mask_path.unlink()
+            except Exception:
+                pass
+
+        autostart_plasma = config_dir / "autostart" / "org.kde.plasmashell.desktop"
+        try:
+            if os.path.lexists(autostart_plasma) and (
+                autostart_plasma.is_symlink()
+                or "hidden=true" in autostart_plasma.read_text(encoding="utf-8", errors="ignore").lower()
+            ):
+                autostart_plasma.unlink()
+        except Exception:
+            pass
+
+        if shutil.which("systemctl"):
+            try:
+                subprocess.run(
+                    ["systemctl", "--user", "daemon-reload"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=6,
+                )
+            except Exception:
+                pass
+
+            for unit in ("plasma-wallpaper.service", "plasma-plasmashell.service"):
+                try:
+                    subprocess.run(
+                        ["systemctl", "--user", "start", unit],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=8,
+                    )
+                except Exception:
+                    pass
+
+        probe_cmd, use_gdbus = _find_plasma_probe_cmd()
+        if probe_cmd:
+            for _ in range(24):  # Poll up to 6s (0.25s step) so shell & panel render before exit
+                try:
+                    res = subprocess.run(
+                        probe_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=2,
+                    )
+                    if res.returncode == 0 and (not use_gdbus or "org.kde.PlasmaShell" in res.stdout):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+
+        self.finishedRestore.emit(self.launch_anaconda)
+
+
 class InstallerBackend(QObject):
     """Qt6/QML bridge for Kushagra OS K-Installer."""
 
@@ -145,6 +247,7 @@ class InstallerBackend(QObject):
     installLogsChanged = pyqtSignal()
     installErrorChanged = pyqtSignal()
     installSucceededChanged = pyqtSignal()
+    launchingDesktopChanged = pyqtSignal()
 
     def __init__(self, preview_mode: bool = False, parent=None):
         super().__init__(parent)
@@ -159,6 +262,8 @@ class InstallerBackend(QObject):
         self._install_logs = []
         self._install_error = ""
         self._install_succeeded = False
+        self._launching_desktop = False
+        self._restore_worker = None
         self._workers = []
 
     @pyqtProperty(list, notify=disksChanged)
@@ -200,6 +305,10 @@ class InstallerBackend(QObject):
     @pyqtProperty(bool, notify=installSucceededChanged)
     def installSucceeded(self):
         return self._install_succeeded
+
+    @pyqtProperty(bool, notify=launchingDesktopChanged)
+    def launchingDesktop(self):
+        return self._launching_desktop
 
     @pyqtSlot()
     def scanDrives(self):
@@ -274,17 +383,41 @@ class InstallerBackend(QObject):
             self._install_error = message
             self.installErrorChanged.emit()
 
+    def _restore_live_desktop(self, launch_anaconda: bool = False):
+        if self._launching_desktop or self._installing:
+            return
+        self._launching_desktop = True
+        self.launchingDesktopChanged.emit()
+
+        worker = RestoreDesktopWorker(launch_anaconda=launch_anaconda, parent=self)
+        worker.finishedRestore.connect(self._on_restore_finished)
+        self._restore_worker = worker
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_restore_finished(self, launch_anaconda: bool):
+        if self._restore_worker is not None:
+            self._restore_worker.wait(1000)
+        if launch_anaconda:
+            try:
+                subprocess.Popen(["liveinst"], start_new_session=True)
+            except Exception:
+                pass
+        QGuiApplication.quit()
+
     @pyqtSlot()
     def tryLiveDesktop(self):
-        QGuiApplication.quit()
+        if self.preview_mode:
+            QGuiApplication.quit()
+            return
+        self._restore_live_desktop(launch_anaconda=False)
 
     @pyqtSlot()
     def launchClassicAnaconda(self):
         if self.preview_mode:
             QGuiApplication.quit()
             return
-        subprocess.Popen(["liveinst"], start_new_session=True)
-        QGuiApplication.quit()
+        self._restore_live_desktop(launch_anaconda=True)
 
     @pyqtSlot()
     def rebootNow(self):
@@ -304,7 +437,7 @@ def _is_real_screen(s) -> bool:
     )
 
 
-def _wait_for_real_screen(app: QGuiApplication, timeout_ms: int = 3000) -> None:
+def _wait_for_real_screen(app: QGuiApplication, timeout_ms: int = 1500) -> None:
     """Wait briefly for kscreen/Wayland output initialization before mapping."""
     if any(_is_real_screen(s) for s in app.screens()):
         return
@@ -354,7 +487,7 @@ def _wait_for_real_screen(app: QGuiApplication, timeout_ms: int = 3000) -> None:
 
 def _bind_fullscreen_sync(app: QGuiApplication, win: QWindow) -> None:
     """Bind screen/output listeners and synchronize fullscreen geometry on Wayland."""
-    state = {"busy": False, "reconfigs": 0}
+    state = {"busy": False}
     connected_screens = set()
 
     def _pick_target():
@@ -397,15 +530,9 @@ def _bind_fullscreen_sync(app: QGuiApplication, win: QWindow) -> None:
 
             win.setMinimumSize(QSize(0, 0))
             win.setScreen(target)
-
-            if win.isVisible() and state["reconfigs"] < 8 and has_valid_geo and win.geometry() != target_geo:
-                state["reconfigs"] += 1
-                win.setVisibility(QWindow.Visibility.Windowed)
+            if has_valid_geo:
                 win.setGeometry(target_geo)
-                QTimer.singleShot(0, win.showFullScreen)
-            else:
-                if has_valid_geo:
-                    win.setGeometry(target_geo)
+            if not win.isVisible() or win.visibility() != QWindow.Visibility.FullScreen:
                 win.showFullScreen()
         finally:
             state["busy"] = False
@@ -460,7 +587,7 @@ def main() -> int:
         return 1
 
     win = engine.rootObjects()[0]
-    _wait_for_real_screen(app, timeout_ms=3000)
+    _wait_for_real_screen(app, timeout_ms=1500)
     if isinstance(win, QWindow):
         _bind_fullscreen_sync(app, win)
     elif hasattr(win, "showFullScreen"):

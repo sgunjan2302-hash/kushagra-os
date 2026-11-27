@@ -189,11 +189,26 @@ fi
 mkdir -p /boot/grub2
 rm -f /boot/grub2/grubenv
 grub2-editenv /boot/grub2/grubenv create
+# Case-insensitive search under mounted /boot/efi/EFI for Windows Boot Manager.
+# Verified Fedora 44 UEFI grubx64.efi facts:
+# - keystatus.mod is NOT available in UEFI grubx64.efi (do NOT use keystatus --shift).
+# - In GNU GRUB 2.12, timeout=0 skips keyboard wait so Esc cannot interrupt it;
+#   single-OS uses timeout=1 + timeout_style=hidden so Esc can still open troubleshooting.
+# - chain and part_gpt are built into Fedora 44 grubx64.efi (do NOT force insmod fat).
+WIN_EFI_ABS="$(find /boot/efi/EFI -maxdepth 4 -iname 'bootmgfw.efi' -print -quit 2>/dev/null || true)"
+WIN_EFI_REL=""
+if [ -n "$WIN_EFI_ABS" ] && [ -n "$EFI_UUID" ]; then
+    WIN_EFI_REL="${WIN_EFI_ABS#/boot/efi}"
+    GRUB_TIMEOUT=4
+    GRUB_STYLE=menu
+else
+    GRUB_TIMEOUT=1
+    GRUB_STYLE=hidden
+fi
 cat <<EOF > /boot/grub2/grub.cfg
 set default="0"
-set timeout=5
-set timeout_style=menu
-terminal_output console
+set timeout_style=${GRUB_STYLE}
+set timeout=${GRUB_TIMEOUT}
 
 rmmod tpm
 insmod part_gpt
@@ -208,22 +223,22 @@ set gfxpayload=keep
 
 menuentry "Kushagra OS 44 (${KVER})" --class fedora --class gnu-linux --class gnu --class os {
     search --no-floppy --fs-uuid --set=root ${GRUB_BOOT_UUID}
-    linux ${BOOT_PREFIX}/vmlinuz-${KVER} root=UUID=${ROOT_UUID} rootfstype=btrfs rootflags=subvol=root rw rhgb quiet console=ttyS0 console=tty0
+    linux ${BOOT_PREFIX}/vmlinuz-${KVER} root=UUID=${ROOT_UUID} rootfstype=btrfs rootflags=subvol=root rw quiet splash rhgb loglevel=3 systemd.show_status=false rd.systemd.show_status=auto rd.udev.log_level=3 udev.log_priority=3 vt.global_cursor_default=0
     initrd ${BOOT_PREFIX}/initramfs-${KVER}.img
 }
 
-menuentry "Kushagra OS 44 (${KVER} · Verbose Logs)" --class fedora --class gnu-linux --class gnu --class os {
+menuentry "Kushagra OS 44 (${KVER} · Verbose / Debug Logs)" --class fedora --class gnu-linux --class gnu --class os {
     search --no-floppy --fs-uuid --set=root ${GRUB_BOOT_UUID}
-    linux ${BOOT_PREFIX}/vmlinuz-${KVER} root=UUID=${ROOT_UUID} rootfstype=btrfs rootflags=subvol=root rw console=ttyS0 console=tty0
+    linux ${BOOT_PREFIX}/vmlinuz-${KVER} root=UUID=${ROOT_UUID} rootfstype=btrfs rootflags=subvol=root rw console=tty0 console=ttyS0 systemd.show_status=true
     initrd ${BOOT_PREFIX}/initramfs-${KVER}.img
 }
 EOF
-if [ -f /boot/efi/EFI/Microsoft/Boot/bootmgfw.efi ] && [ -n "$EFI_UUID" ]; then
+if [ -n "$WIN_EFI_ABS" ] && [ -n "$EFI_UUID" ]; then
     cat <<EOF >> /boot/grub2/grub.cfg
 
 menuentry "Windows Boot Manager" --class windows --class os {
     search --no-floppy --fs-uuid --set=root ${EFI_UUID}
-    chainloader /EFI/Microsoft/Boot/bootmgfw.efi
+    chainloader ${WIN_EFI_REL}
 }
 EOF
 fi

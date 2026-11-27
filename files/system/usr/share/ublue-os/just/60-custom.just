@@ -88,7 +88,7 @@ setup-waydroid ACTION="setup":
 
     echo "Initializing Waydroid system container..."
     sudo waydroid init || echo "Waydroid already initialized or requires network access."
-    sudo systemctl restart waydroid-container.service || true
+    sudo systemctl enable --now waydroid-container.service 2>/dev/null || sudo systemctl restart waydroid-container.service || true
 
     # Check for NVIDIA graphics after waydroid init so waydroid.cfg exists to patch
     if ! command -v lspci >/dev/null 2>&1; then
@@ -293,3 +293,19 @@ check-anti-cheat:
     echo "Honesty Policy: Kushagra OS will never claim compatibility with proprietary"
     echo "Windows kernel rootkit anti-cheat engines. For unsupported titles, dual-booting"
     echo "into your coexisting Windows partition is the officially recommended path."
+
+# Toggle Quad9 malware-blocking DNS / Indian captive-portal compatibility (on|off|status)
+kavach-dns ACTION="status":
+    @/usr/libexec/kushagra-kavach-dns "{{ACTION}}"
+
+# On-demand ClamAV malware scan without always-on clamd daemon
+scan-path PATH=".":
+    @/usr/bin/kushagra-kavach-scan "{{PATH}}"
+
+# Configure opt-in HID-safe USBGuard protection with 15s lockout rollback (enable|disable|allow-connected|status)
+setup-usbguard ACTION="status":
+    @/usr/libexec/kushagra-usbguard-setup "{{ACTION}}"
+
+# Configure school/office local LAN update mirror (set <host:port> [--insecure] | reset | status)
+setup-lan-mirror *ARGS:
+    @/usr/libexec/kushagra-lan-mirror {{ARGS}}

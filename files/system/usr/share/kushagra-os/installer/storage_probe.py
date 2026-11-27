@@ -13,7 +13,7 @@ MIN_VISUAL_GAP_BYTES = 1 * 1024 * 1024 * 1024  # 1 GiB
 MIN_ESP_FREE_MIB = 35
 
 ESP_PARTTYPES = {
-    "c12a7328-f81f-11d2-ba4b-00a0c93ec3b3",
+    "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
     "0xef",
 }
 
@@ -208,7 +208,7 @@ def _classify_partition(part: dict, disk_path: str, disk_kname: str, is_live_dis
     path = part.get("path") or (f"/dev/{kname}" if kname else "")
     size_b = int(part.get("size") or 0)
     fstype = (part.get("fstype") or "").strip().lower()
-    parttype = (part.get("parttype") or "").strip().lower()
+    parttype = (part.get("parttype") or "").strip().strip("{}").lower()
     label = (part.get("label") or "").strip()
     partlabel = (part.get("partlabel") or "").strip()
     combined_label = f"{label} {partlabel}".lower()

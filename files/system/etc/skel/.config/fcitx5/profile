@@ -1,0 +1,15 @@
+[Groups/0]
+Name=Default
+Default Layout=in-eng
+DefaultIM=m17n_hi_itrans
+
+[Groups/0/Items/0]
+Name=keyboard-in-eng
+Layout=
+
+[Groups/0/Items/1]
+Name=m17n_hi_itrans
+Layout=
+
+[GroupOrder]
+0=Default

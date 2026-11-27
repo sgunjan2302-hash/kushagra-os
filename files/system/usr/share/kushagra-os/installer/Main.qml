@@ -11,6 +11,12 @@ Window {
     color: "#060913"
     title: "Kushagra OS Installer"
 
+    onClosing: function(close) {
+        if (!isPreviewMode && !installerBackend.launchingDesktop) {
+            close.accepted = false
+        }
+    }
+
     property int currentStep: 0 // 0=Welcome, 1=Storage, 2=Confirm, 3=Progress
     property string uiLang: "en_IN" // "en_IN" | "hi_IN"
     property bool isHindi: uiLang === "hi_IN"
@@ -287,6 +293,7 @@ Window {
                                 GlassButton {
                                     text: isHindi ? "ड्राइव चयन पर जाएं →" : "Install Kushagra OS →"
                                     highlighted: true
+                                    enabled: !installerBackend.launchingDesktop
                                     Layout.fillWidth: true
                                     onClicked: {
                                         root.currentStep = 1
@@ -320,6 +327,7 @@ Window {
                                 Item { Layout.fillHeight: true }
                                 GlassButton {
                                     text: isHindi ? "लाइव डेस्कटॉप पर जाएं" : "Try Live Desktop"
+                                    enabled: !installerBackend.launchingDesktop
                                     Layout.fillWidth: true
                                     onClicked: installerBackend.tryLiveDesktop()
                                 }
@@ -338,6 +346,7 @@ Window {
                         Item { Layout.fillWidth: true }
                         GlassButton {
                             text: isHindi ? "क्लासिक Anaconda खोलें (liveinst)" : "Classic Anaconda (liveinst)"
+                            enabled: !installerBackend.launchingDesktop
                             onClicked: installerBackend.launchClassicAnaconda()
                         }
                     }
@@ -762,15 +771,98 @@ Window {
 
                 GlassButton {
                     visible: root.currentStep === 3 && installerBackend.installSucceeded
+                    enabled: !installerBackend.launchingDesktop
                     text: isHindi ? "लाइव डेस्कटॉप पर जाएं" : "Continue Live Desktop"
                     onClicked: installerBackend.tryLiveDesktop()
                 }
 
                 GlassButton {
                     visible: root.currentStep === 3 && installerBackend.installSucceeded
+                    enabled: !installerBackend.launchingDesktop
                     highlighted: true
                     text: isHindi ? "अभी रीस्टार्ट करें ↻" : "Restart System Now ↻"
                     onClicked: installerBackend.rebootNow()
+                }
+            }
+        }
+
+        // Crisp non-blocking loading state while LiveCD Plasma desktop & panel start underneath
+        Rectangle {
+            anchors.fill: parent
+            radius: 24
+            z: 20
+            visible: installerBackend.launchingDesktop
+            color: "#D9060913"
+
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+            }
+
+            Rectangle {
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 64, 400)
+                height: launchOverlayCol.implicitHeight + 48
+                radius: 18
+                color: "#F00F172A"
+                border.color: "#44FF9933"
+                border.width: 1
+
+                ColumnLayout {
+                    id: launchOverlayCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: 24
+                    spacing: 14
+
+                    Rectangle {
+                        width: 34
+                        height: 34
+                        radius: 17
+                        color: "transparent"
+                        border.width: 3
+                        border.color: "#33FF9933"
+                        Layout.alignment: Qt.AlignHCenter
+
+                        Rectangle {
+                            width: 10
+                            height: 10
+                            radius: 5
+                            color: "#FF9933"
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: parent.top
+                            anchors.topMargin: -3
+                        }
+
+                        RotationAnimation on rotation {
+                            from: 0
+                            to: 360
+                            duration: 1000
+                            loops: Animation.Infinite
+                            running: installerBackend.launchingDesktop
+                        }
+                    }
+
+                    Text {
+                        text: isHindi ? "लाइव डेस्कटॉप खुल रहा है..." : "Opening Live Desktop..."
+                        color: "#FFFFFF"
+                        font.pixelSize: 17
+                        font.weight: Font.Bold
+                        horizontalAlignment: Text.AlignHCenter
+                        Layout.fillWidth: true
+                    }
+
+                    Text {
+                        text: isHindi
+                              ? "कृपया प्रतीक्षा करें, KDE Plasma डेस्कटॉप और पैनल तैयार हो रहे हैं..."
+                              : "Starting KDE Plasma desktop & taskbar seamlessly..."
+                        color: "#94A3B8"
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                        horizontalAlignment: Text.AlignHCenter
+                        Layout.fillWidth: true
+                    }
                 }
             }
         }

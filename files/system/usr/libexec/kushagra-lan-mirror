@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra Kavach - School/Office Local LAN Update Mirror Helper
+# Manages strictly /etc/containers/registries.conf.d/90-kushagra-lan-mirror.conf
+# Enforces pull-from-mirror = "digest-only" scoped strictly to ghcr.io/sgunjan2302-hash/kushagra-os.
+
+CONF_DIR="/etc/containers/registries.conf.d"
+CONF_FILE="${CONF_DIR}/90-kushagra-lan-mirror.conf"
+UPSTREAM_REPO="ghcr.io/sgunjan2302-hash/kushagra-os"
+TEMP_FILES=()
+
+cleanup() {
+    if [ "${#TEMP_FILES[@]}" -gt 0 ]; then
+        rm -f "${TEMP_FILES[@]}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+usage() {
+    cat <<'EOF'
+Usage:
+  kushagra-lan-mirror <host:port> [--insecure|--http]
+  kushagra-lan-mirror set <host:port> [--insecure|--http]
+  kushagra-lan-mirror reset | off | disable
+  kushagra-lan-mirror status
+
+Options:
+  --insecure, --http, http   Allow plain HTTP inside [[registry.mirror]] ONLY (never global).
+                             Also auto-enabled if URL starts with http://.
+EOF
+}
+
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    elif command -v pkexec >/dev/null 2>&1; then
+        pkexec "$@"
+    else
+        echo "ERROR: Root privileges (sudo or pkexec) are required." >&2
+        exit 1
+    fi
+}
+
+validate_host_port() {
+    local val="$1"
+    if [ -z "$val" ]; then
+        echo "ERROR: Mirror <host:port> cannot be empty." >&2
+        return 1
+    fi
+    if ! [[ "$val" =~ ^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+)(:([0-9]{1,5}))?$ ]]; then
+        echo "ERROR: Invalid mirror host:port '${val}' (expected e.g. 192.168.1.50:5000 or mirror.lan:5000)." >&2
+        return 1
+    fi
+    local port="${BASH_REMATCH[3]:-}"
+    if [ -n "$port" ]; then
+        if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+            echo "ERROR: Invalid port '${port}' (must be 1-65535)." >&2
+            return 1
+        fi
+    fi
+}
+
+cmd_set() {
+    local raw_host=""
+    local insecure=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --insecure|--http|http)
+                insecure=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -*)
+                echo "ERROR: Unknown option: $1" >&2
+                usage >&2
+                exit 1
+                ;;
+            *)
+                if [ -n "$raw_host" ]; then
+                    echo "ERROR: Unexpected extra argument: $1" >&2
+                    usage >&2
+                    exit 1
+                fi
+                raw_host="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$raw_host" ]; then
+        echo "ERROR: Mirror <host:port> is required." >&2
+        usage >&2
+        exit 1
+    fi
+
+    if [[ "$raw_host" == http://* ]]; then
+        insecure=1
+        raw_host="${raw_host#http://}"
+    elif [[ "$raw_host" == https://* ]]; then
+        raw_host="${raw_host#https://}"
+    fi
+    raw_host="${raw_host%/}"
+
+    validate_host_port "$raw_host"
+
+    local tmp_toml
+    tmp_toml="$(mktemp)"
+    TEMP_FILES+=("$tmp_toml")
+
+    {
+        cat <<EOF
+# Kushagra Kavach - School/Office Local LAN Update Mirror
+# Scoped strictly to ${UPSTREAM_REPO} with digest-only mirror pulls.
+# Upstream ghcr.io remains authoritative for tags/signatures and automatic fallback if offline.
+
+[[registry]]
+prefix = "${UPSTREAM_REPO}"
+location = "${UPSTREAM_REPO}"
+
+[[registry.mirror]]
+location = "${raw_host}/sgunjan2302-hash/kushagra-os"
+pull-from-mirror = "digest-only"
+EOF
+        if [ "$insecure" -eq 1 ]; then
+            echo "insecure = true"
+        fi
+    } > "$tmp_toml"
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$tmp_toml"
+    fi
+
+    run_root install -d -m 0755 "$CONF_DIR"
+    run_root install -m 0644 "$tmp_toml" "$CONF_FILE"
+    if command -v restorecon >/dev/null 2>&1; then
+        run_root restorecon -RF "$CONF_DIR" || true
+    fi
+
+    echo "[PASS] Configured LAN update mirror in ${CONF_FILE}"
+    echo "  Upstream Scope : ${UPSTREAM_REPO}"
+    echo "  Mirror Target  : ${raw_host}/sgunjan2302-hash/kushagra-os"
+    echo "  Pull Policy    : digest-only (cosign/digest verification enforced; auto-fallback to ghcr.io)"
+    if [ "$insecure" -eq 1 ]; then
+        echo "  TLS Mode       : HTTP allowed (insecure = true scoped ONLY to this [[registry.mirror]])"
+    else
+        echo "  TLS Mode       : HTTPS strict"
+    fi
+}
+
+cmd_reset() {
+    run_root rm -f "$CONF_FILE"
+    echo "[PASS] Removed ${CONF_FILE}."
+    echo "Updates now pull directly from upstream ${UPSTREAM_REPO}."
+}
+
+cmd_status() {
+    echo "=== Kushagra Kavach LAN Update Mirror Status ==="
+    if [ -f "$CONF_FILE" ]; then
+        echo "Config File : ${CONF_FILE} (ACTIVE)"
+        grep -Ev '^[[:space:]]*(#|;|$)' "$CONF_FILE" | sed 's/^/  /' || true
+    else
+        echo "Config File : ${CONF_FILE} (not configured)"
+        echo "Active Mode : Direct upstream pulls from ${UPSTREAM_REPO}"
+    fi
+}
+
+if [ $# -eq 0 ]; then
+    cmd_status
+    exit 0
+fi
+
+case "$1" in
+    set)
+        shift
+        cmd_set "$@"
+        ;;
+    reset|off|disable)
+        cmd_reset
+        ;;
+    status)
+        cmd_status
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        if [[ "$1" == *:* || "$1" == *.* || "$1" == -* ]]; then
+            cmd_set "$@"
+        else
+            echo "ERROR: Unknown command '$1' (expected 'set <host:port>', '<host:port>', 'reset', or 'status')." >&2
+            usage >&2
+            exit 1
+        fi
+        ;;
+esac

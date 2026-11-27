@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Service
+MimeType=inode/directory;application/octet-stream;all/allfiles;
+Actions=ScanWithKavach;
+
+[Desktop Action ScanWithKavach]
+Name=Scan with Kushagra Kavach
+Icon=security-high
+Exec=konsole --hold -e /usr/bin/kushagra-kavach-scan %F

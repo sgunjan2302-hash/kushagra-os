@@ -17,6 +17,7 @@ modules:
     scripts:
       - 01-configure-fcitx5-wayland.sh
       - 02-system-tuning.sh
+      - 03-configure-plymouth-theme.sh
 
   - type: systemd
     system:
@@ -38,7 +39,7 @@ modules:
       NAME: "Kushagra OS"
       ID: "kushagra-os"
       ID_LIKE: "fedora"
-      PRETTY_NAME: "Kushagra OS 44 (v0.2.1)"
+      PRETTY_NAME: "Kushagra OS 44 (v0.3.0)"
       DEFAULT_HOSTNAME: "kushagra-pc"
       HOME_URL: "https://github.com/kushagra-os"
       SUPPORT_URL: "https://github.com/kushagra-os/kushagra-os/issues"

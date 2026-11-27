@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Universal Android (.apk) Double-Click Installer Wrapper
+exec /usr/bin/python3 /usr/share/kushagra-os/apkrun/main.py "$@"

@@ -1,0 +1,16 @@
+[Unit]
+Description=Kushagra OS OOBE Fullscreen UI
+ConditionKernelCommandLine=!rd.live.image
+ConditionUser=kushagra-oobe
+PartOf=graphical-session.target
+After=plasma-kwin_wayland.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kushagra-setup
+Restart=on-failure
+RestartSec=1s
+Slice=app.slice
+
+[Install]
+WantedBy=plasma-workspace-wayland.target

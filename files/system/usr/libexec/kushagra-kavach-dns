@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra Kavach - Quad9 DNS & Indian Captive-Portal Toggle Helper
+# Manages temporary captive-portal bypass without altering immutable /usr defaults.
+
+BASE_CONF="/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf"
+BYPASS_CONF="/etc/systemd/resolved.conf.d/99-kushagra-captive-bypass.conf"
+TEMP_FILES=()
+
+cleanup() {
+    if [ "${#TEMP_FILES[@]}" -gt 0 ]; then
+        rm -f "${TEMP_FILES[@]}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-kavach-dns [on|off|status]
+
+Commands:
+  on      (aliases: enable, quad9)
+          Remove captive-portal bypass and restore Quad9 filtering DNS + opportunistic DoT.
+  off     (aliases: disable, captive, captive-bypass)
+          Temporarily clear static Quad9 DNS so hotel/rail/airport DHCP DNS loads captive portals.
+  status  Show active resolved configuration and DNS status (read-only).
+EOF
+}
+
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    elif command -v pkexec >/dev/null 2>&1; then
+        pkexec "$@"
+    else
+        echo "ERROR: Root privileges (sudo or pkexec) are required to modify DNS settings." >&2
+        exit 1
+    fi
+}
+
+print_resolvectl_summary() {
+    if ! command -v resolvectl >/dev/null 2>&1; then
+        echo "  resolvectl: command not found"
+        return 0
+    fi
+    local status_out
+    status_out="$(resolvectl status 2>/dev/null || true)"
+    if [ -z "$status_out" ]; then
+        echo "  resolvectl: no status output (systemd-resolved may be inactive)"
+        return 0
+    fi
+    printf '%s\n' "$status_out" | grep -E '^(Global|Link [0-9]+|.*Protocols:|.*Current Scopes:|.*Current DNS Server:|.*DNS Servers:|.*Fallback DNS Servers:|.*DNSOverTLS)' | sed 's/^/  /' || true
+}
+
+cmd_on() {
+    echo "Restoring Kushagra Kavach Quad9 filtering DNS (opportunistic DoT)..."
+    run_root rm -f "$BYPASS_CONF"
+    run_root systemctl restart systemd-resolved.service
+
+    if command -v resolvectl >/dev/null 2>&1; then
+        local status_out
+        status_out="$(resolvectl status 2>/dev/null || true)"
+        if printf '%s\n' "$status_out" | grep -Eiq 'DNSOverTLS(=|[[:space:]]+setting:[[:space:]]*)yes'; then
+            echo "[FAIL] Strict DNSOverTLS=yes detected in resolvectl status!" >&2
+            exit 1
+        fi
+        if printf '%s\n' "$status_out" | grep -Eq '(^|[^0-9])(9\.9\.9\.10|149\.112\.112\.10|2620:fe::10)([^0-9]|$)'; then
+            echo "[FAIL] Unfiltered Quad9 (.10) server detected in resolvectl status!" >&2
+            exit 1
+        fi
+        if printf '%s\n' "$status_out" | grep -q '9\.9\.9\.9'; then
+            echo "[PASS] Quad9 filtering DNS (9.9.9.9 / 149.112.112.112) with opportunistic DoT verified."
+        else
+            echo "[WARN] systemd-resolved restarted, but 9.9.9.9 not yet listed in resolvectl status (network may be offline)."
+        fi
+        print_resolvectl_summary
+    else
+        echo "[WARN] resolvectl not found; bypass removed and systemd-resolved restarted."
+    fi
+}
+
+cmd_off() {
+    echo "Enabling temporary captive-portal DNS bypass..."
+    local tmp_conf
+    tmp_conf="$(mktemp)"
+    TEMP_FILES+=("$tmp_conf")
+
+    cat > "$tmp_conf" <<'EOF'
+# Kushagra Kavach - Temporary Captive Portal DNS Bypass
+# Clears static Quad9 DNS= so hotel, rail, and airport DHCP DNS resolves captive portals cleanly.
+[Resolve]
+DNS=
+FallbackDNS=
+DNSOverTLS=no
+EOF
+
+    run_root install -d -m 0755 /etc/systemd/resolved.conf.d
+    run_root install -m 0644 "$tmp_conf" "$BYPASS_CONF"
+    run_root systemctl restart systemd-resolved.service
+
+    echo "[OK] Captive-portal DNS bypass active (${BYPASS_CONF})."
+    echo "Local DHCP DNS is now enabled for hotel, railway, and airport login portals."
+    echo ""
+    echo "IMPORTANT: After logging into the Wi-Fi portal, restore malware/phishing protection:"
+    echo "  ujust kavach-dns on"
+}
+
+cmd_status() {
+    echo "=== Kushagra Kavach DNS Protection Status ==="
+    if [ -f "$BASE_CONF" ]; then
+        echo "Base Config: ${BASE_CONF} (present)"
+    else
+        echo "Base Config: ${BASE_CONF} (MISSING)"
+    fi
+
+    if [ -f "$BYPASS_CONF" ]; then
+        echo "Active Mode: CAPTIVE-PORTAL BYPASS (${BYPASS_CONF} present)"
+        echo "Notice: Run 'ujust kavach-dns on' after completing portal login."
+    else
+        echo "Active Mode: QUAD9 FILTERED + OPPORTUNISTIC DoT (captive-portal safe)"
+    fi
+
+    echo "Runtime resolvectl summary:"
+    print_resolvectl_summary
+}
+
+ACTION="${1:-status}"
+case "$ACTION" in
+    on|enable|quad9)
+        cmd_on
+        ;;
+    off|disable|captive|captive-bypass)
+        cmd_off
+        ;;
+    status)
+        cmd_status
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        echo "ERROR: Unknown subcommand: $ACTION" >&2
+        usage >&2
+        exit 1
+        ;;
+esac

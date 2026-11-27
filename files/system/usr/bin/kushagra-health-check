@@ -86,20 +86,40 @@ else
     record_pass "Realtek rtw89 hardware not active on this host (VM/non-Realtek hardware)"
 fi
 
-# 6. systemd-resolved Opportunistic DNS-over-TLS
-echo -n "Checking systemd-resolved DoT configuration... "
+# 6. systemd-resolved Quad9 + Opportunistic DNS-over-TLS
+echo -n "Checking systemd-resolved Quad9 DoT configuration... "
+resolved_active_cfg=""
+if [ -d "/etc/systemd/resolved.conf.d" ]; then
+    resolved_active_cfg=$(grep -hEv '^[[:space:]]*(#|;|$)' /etc/systemd/resolved.conf.d/*.conf 2>/dev/null || true)
+fi
+base_resolved_cfg=""
+if [ -f "/etc/systemd/resolved.conf.d/10-dot-opportunistic.conf" ]; then
+    base_resolved_cfg=$(grep -Ev '^[[:space:]]*(#|;|$)' /etc/systemd/resolved.conf.d/10-dot-opportunistic.conf 2>/dev/null || true)
+fi
+resolve_status=""
 if command -v resolvectl >/dev/null 2>&1; then
     resolve_status=$(resolvectl status 2>/dev/null || true)
-    if echo "$resolve_status" | grep -iq "DNSOverTLS=yes"; then
-        record_fail "Strict DNSOverTLS=yes detected (breaks Indian captive portals!)"
-    else
-        record_pass "Captive-portal safe DNS settings active (opportunistic DoT)"
-    fi
-else
-    record_warn "resolvectl command not found"
 fi
 
-# 7. Wayland Fcitx5 IME Environment Variables
+if printf '%s\n%s\n' "$resolved_active_cfg" "$resolve_status" | grep -Eiq 'DNSOverTLS(=|[[:space:]]+setting:[[:space:]]*)yes'; then
+    record_fail "Strict DNSOverTLS=yes detected (breaks Indian captive portals!)"
+elif printf '%s\n%s\n' "$resolved_active_cfg" "$resolve_status" | grep -Eq '(^|[^0-9])(9\.9\.9\.10|149\.112\.112\.10|2620:fe::10)([^0-9]|$)'; then
+    record_fail "Unfiltered Quad9 (.10) DNS detected (must use filtering 9.9.9.9 / 149.112.112.112!)"
+elif [ -f "/etc/systemd/resolved.conf.d/99-kushagra-captive-bypass.conf" ]; then
+    record_warn "Captive-portal DNS bypass active (run 'ujust kavach-dns on' after portal login)"
+elif ! printf '%s\n' "$base_resolved_cfg" | grep -q '9\.9\.9\.9' || ! printf '%s\n' "$base_resolved_cfg" | grep -iq 'DNSOverTLS=opportunistic'; then
+    record_fail "10-dot-opportunistic.conf missing Quad9 filtering DNS (9.9.9.9) or DNSOverTLS=opportunistic"
+elif command -v resolvectl >/dev/null 2>&1; then
+    if printf '%s\n' "$resolve_status" | grep -q '9\.9\.9\.9'; then
+        record_pass "Quad9 filtering DNS (9.9.9.9) active with opportunistic DoT (captive-portal safe)"
+    else
+        record_warn "Quad9 opportunistic DoT configured, but 9.9.9.9 not active in resolvectl status"
+    fi
+else
+    record_warn "resolvectl command not found (10-dot-opportunistic.conf validated)"
+fi
+
+# 7. Wayland Fcitx5 IME Environment Variables & InputMethod[$i] Lock
 echo -n "Checking Wayland input method environment... "
 env_file="/etc/environment"
 has_xmod=0
@@ -120,6 +140,24 @@ else
     record_warn "XMODIFIERS not set in $env_file"
 fi
 
+echo -n "Checking KWin Wayland InputMethod[\$i] lock... "
+kwin_im_lines=""
+for kwin_cfg in /etc/xdg/kwinrc /etc/skel/.config/kwinrc; do
+    if [ -f "$kwin_cfg" ]; then
+        kwin_im_lines+="$(grep -E '^[[:space:]]*InputMethod' "$kwin_cfg" 2>/dev/null || true)"$'\n'
+    fi
+done
+
+if printf '%s' "$kwin_im_lines" | grep -Eq '^[[:space:]]*InputMethod\[\$e?i\]=.*fcitx5'; then
+    record_pass "KWin Wayland InputMethod locked to Fcitx5 (InputMethod[\$i])"
+elif printf '%s' "$kwin_im_lines" | grep -Eq 'plasma-keyboard'; then
+    record_fail "KWin Wayland InputMethod references plasma-keyboard instead of locked Fcitx5"
+elif printf '%s' "$kwin_im_lines" | grep -Eq 'fcitx5'; then
+    record_warn "KWin Wayland InputMethod uses Fcitx5 without immutable [\$i] lock"
+else
+    record_warn "KWin Wayland InputMethod[\$i] lock not found in /etc/xdg/kwinrc or /etc/skel/.config/kwinrc"
+fi
+
 # 8. Flatpak Remotes
 echo -n "Checking Flatpak repositories... "
 if command -v flatpak >/dev/null 2>&1; then
@@ -130,6 +168,51 @@ if command -v flatpak >/dev/null 2>&1; then
     fi
 else
     record_fail "flatpak command not found"
+fi
+
+# 9. Kushagra Kavach USBGuard Safe Default (Rule #9 Zero Lockout)
+echo -n "Checking Kushagra Kavach USBGuard safety... "
+usbguard_enabled=$(systemctl is-enabled usbguard.service 2>/dev/null || true)
+usbguard_active=$(systemctl is-active usbguard.service 2>/dev/null || true)
+if [ "$usbguard_active" = "active" ] || [ "$usbguard_enabled" = "enabled" ]; then
+    if [ -s "/etc/usbguard/rules.conf" ]; then
+        record_pass "usbguard.service enabled/active with non-empty /etc/usbguard/rules.conf"
+    else
+        record_fail "usbguard.service enabled/active without non-empty /etc/usbguard/rules.conf (HID lockout risk!)"
+    fi
+elif [ ! -f "/etc/systemd/system/usbguard.service.d/10-kushagra-safe.conf" ]; then
+    record_warn "usbguard.service disabled, but 10-kushagra-safe.conf guard drop-in missing"
+elif [ -s "/etc/usbguard/rules.conf" ]; then
+    record_pass "usbguard.service disabled (safe guard active; rules staged in /etc/usbguard/rules.conf)"
+else
+    record_pass "usbguard.service disabled by default (Rule #9 zero-lockout safe)"
+fi
+
+# 10. Kushagra Kavach On-Demand ClamAV (No Background clamd Daemon)
+echo -n "Checking Kushagra Kavach ClamAV configuration... "
+if systemctl is-active --quiet clamd.service 2>/dev/null || systemctl is-active --quiet clamd@scan.service 2>/dev/null; then
+    record_fail "Background clamd daemon is active (violates 4 GB RAM budget; use on-demand clamscan only)"
+elif command -v clamscan >/dev/null 2>&1; then
+    record_pass "clamscan available for on-demand scanning; no background clamd daemon active"
+else
+    record_warn "clamscan command not found (on-demand ClamAV unavailable; clamd inactive)"
+fi
+
+# 11. Kushagra Kavach Local LAN Update Mirror Status
+echo -n "Checking Kushagra Kavach LAN update mirror... "
+lan_mirror_conf="/etc/containers/registries.conf.d/90-kushagra-lan-mirror.conf"
+if [ -f "$lan_mirror_conf" ]; then
+    mirror_active=$(grep -Ev '^[[:space:]]*(#|;|$)' "$lan_mirror_conf" 2>/dev/null || true)
+    if printf '%s\n' "$mirror_active" | grep -q 'ghcr\.io' \
+        && printf '%s\n' "$mirror_active" | grep -q 'pull-from-mirror[[:space:]]*=[[:space:]]*"digest-only"' \
+        && ! printf '%s\n' "$mirror_active" | grep -Eq 'location[[:space:]]*=[[:space:]]*"\*"'; then
+        mirror_loc=$(printf '%s\n' "$mirror_active" | awk -F'"' '/^\[\[registry\.mirror\]\]/{in_m=1; next} in_m && /location[[:space:]]*=/{print $2; exit}' || true)
+        record_pass "LAN mirror configured (${mirror_loc:-custom}) with ghcr.io scope and digest-only verification"
+    else
+        record_fail "90-kushagra-lan-mirror.conf has missing ghcr.io scope, missing digest-only policy, or wildcard rule"
+    fi
+else
+    record_pass "LAN update mirror not configured (using direct upstream ghcr.io)"
 fi
 
 echo "================================================================================"

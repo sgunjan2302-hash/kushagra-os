@@ -5,5 +5,5 @@ Comment=First-boot configuration wizard for Kushagra OS
 Exec=/usr/bin/kushagra-setup
 Icon=/usr/share/kushagra-os/branding/logo-symbol.svg
 NoDisplay=true
-X-KDE-autostart-phase=2
+X-KDE-autostart-phase=0
 StartupNotify=false

@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra Kavach - Opt-In HID-Safe USBGuard Setup Helper
+# Rule #9 Zero-Lockout Design:
+# - Never runs inside LiveCD sessions (rd.live.image)
+# - Validates non-empty generated policy and connected USB HID (03:) devices
+# - Enforces 15-second confirmation rollback so hardware lockout is impossible
+
+RULES_FILE="/etc/usbguard/rules.conf"
+DAEMON_CONF="/etc/usbguard/usbguard-daemon.conf"
+TEMP_FILES=()
+
+cleanup() {
+    if [ "${#TEMP_FILES[@]}" -gt 0 ]; then
+        rm -f "${TEMP_FILES[@]}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-usbguard-setup [enable|disable|allow-connected|status]
+
+Commands:
+  enable           Generate baseline USB whitelist, start usbguard.service, and verify with 15s rollback.
+  disable          Disable and stop usbguard.service cleanly.
+  allow-connected  Permanently allow currently connected/blocked USB devices.
+  status           Show USBGuard service and policy status (read-only).
+EOF
+}
+
+is_live_session() {
+    grep -qw "rd.live.image" /proc/cmdline 2>/dev/null
+}
+
+require_not_live() {
+    if is_live_session; then
+        echo "[BLOCKED] USBGuard management is disabled during LiveCD sessions (rd.live.image)." >&2
+        echo "Install Kushagra OS to disk first, then run 'ujust setup-usbguard enable'." >&2
+        exit 1
+    fi
+}
+
+require_usbguard_bin() {
+    if ! command -v usbguard >/dev/null 2>&1; then
+        echo "ERROR: 'usbguard' command not found. Ensure usbguard packages are installed." >&2
+        exit 1
+    fi
+}
+
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    elif command -v pkexec >/dev/null 2>&1; then
+        pkexec "$@"
+    else
+        echo "ERROR: Root privileges (sudo or pkexec) are required." >&2
+        exit 1
+    fi
+}
+
+count_connected_usb_hid() {
+    local hid_count=0
+    local cls_file
+    for cls_file in /sys/bus/usb/devices/*/bInterfaceClass; do
+        [ -r "$cls_file" ] || continue
+        if [ "$(tr -d '[:space:]' < "$cls_file" 2>/dev/null || true)" = "03" ]; then
+            hid_count=$((hid_count + 1))
+        fi
+    done
+    echo "$hid_count"
+}
+
+generate_safe_policy() {
+    local out_file="$1"
+    run_root usbguard generate-policy > "$out_file"
+
+    if [ ! -s "$out_file" ] || ! grep -Eq '^[[:space:]]*allow[[:space:]]+' "$out_file"; then
+        echo "[ABORTED] Generated USBGuard policy is empty (zero allow rules)." >&2
+        if command -v lsusb >/dev/null 2>&1; then
+            echo "Connected USB devices (lsusb):" >&2
+            lsusb >&2 || true
+        fi
+        echo "Refusing to write an empty ${RULES_FILE} to prevent hardware lockout." >&2
+        return 1
+    fi
+
+    local sys_hid_count policy_hid_count rule_count
+    sys_hid_count="$(count_connected_usb_hid)"
+    policy_hid_count="$(grep -Ec '^[[:space:]]*allow[[:space:]].*with-interface[[:space:]]+(\{[^}]*)?03:' "$out_file" || true)"
+    rule_count="$(grep -Ec '^[[:space:]]*allow[[:space:]]+' "$out_file" || true)"
+
+    if [ "$sys_hid_count" -gt 0 ] && [ "$policy_hid_count" -eq 0 ]; then
+        echo "[ABORTED] Detected ${sys_hid_count} USB HID interface(s), but policy has 0 HID (03:) allow rules!" >&2
+        echo "Refusing to enable USBGuard to prevent keyboard/mouse lockout." >&2
+        return 1
+    fi
+
+    if [ "$policy_hid_count" -gt 0 ]; then
+        echo "Verified ${policy_hid_count} USB HID (03:) allow rule(s) across ${rule_count} baseline rule(s)."
+    else
+        echo "Notice: 0 USB HID interfaces detected (internal PS/2 or I2C keyboard/trackpad assumed)."
+        if command -v lsusb >/dev/null 2>&1; then
+            echo "USB bus devices (lsusb):"
+            lsusb || true
+        fi
+        echo "Verified non-empty baseline policy (${rule_count} allow rule(s)); proceeding safely."
+    fi
+}
+
+configure_daemon_ipc() {
+    if [ ! -f "$DAEMON_CONF" ]; then
+        echo "[WARN] ${DAEMON_CONF} not found; skipping IPCAllowedGroups configuration."
+        return 0
+    fi
+    if grep -Eq '^[[:space:]]*#?[[:space:]]*IPCAllowedGroups=' "$DAEMON_CONF"; then
+        run_root sed -i -E 's/^[[:space:]]*#?[[:space:]]*IPCAllowedGroups=.*/IPCAllowedGroups=wheel/' "$DAEMON_CONF"
+    else
+        printf '\nIPCAllowedGroups=wheel\n' | run_root tee -a "$DAEMON_CONF" >/dev/null
+    fi
+}
+
+toggle_notifier() {
+    local mode="$1"
+    if [ ! -f /usr/lib/systemd/user/usbguard-notifier.service ] && [ ! -f /etc/systemd/user/usbguard-notifier.service ]; then
+        return 0
+    fi
+
+    if [ "$(id -u)" -ne 0 ]; then
+        systemctl --user "$mode" --now usbguard-notifier.service 2>/dev/null || true
+    elif [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        local sudo_uid
+        sudo_uid="$(id -u "$SUDO_USER" 2>/dev/null || true)"
+        if [ -n "$sudo_uid" ] && [ -d "/run/user/${sudo_uid}" ]; then
+            runuser -u "$SUDO_USER" -- env \
+                XDG_RUNTIME_DIR="/run/user/${sudo_uid}" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${sudo_uid}/bus" \
+                systemctl --user "$mode" --now usbguard-notifier.service 2>/dev/null || true
+        fi
+    fi
+}
+
+cmd_enable() {
+    require_not_live
+    require_usbguard_bin
+
+    echo "=== Kushagra Kavach USBGuard Safe Enablement ==="
+    local tmp_policy
+    tmp_policy="$(mktemp)"
+    TEMP_FILES+=("$tmp_policy")
+
+    generate_safe_policy "$tmp_policy"
+
+    run_root install -d -m 0755 /etc/usbguard
+    run_root install -m 0600 "$tmp_policy" "$RULES_FILE"
+    configure_daemon_ipc
+
+    if command -v restorecon >/dev/null 2>&1; then
+        run_root restorecon -RF /etc/usbguard || true
+    fi
+
+    run_root systemctl enable --now usbguard.service
+    toggle_notifier enable
+
+    echo ""
+    echo "================================================================================"
+    echo "USBGuard is now ACTIVE with connected devices whitelisted."
+    echo "SAFETY CHECK: Test your keyboard and mouse right now."
+    echo "Type 'y' and press Enter within 15 seconds to KEEP USBGuard enabled."
+    echo "Any other input or timeout will automatically DISABLE USBGuard (zero lockout)."
+    echo "================================================================================"
+
+    local confirm=""
+    if read -r -t 15 -p "Keep USBGuard enabled? [y/N] (15s auto-rollback): " confirm; then
+        case "$confirm" in
+            [Yy]|[Yy][Ee][Ss])
+                echo "[PASS] USBGuard confirmed active and locked in."
+                ;;
+            *)
+                echo ""
+                echo "[ROLLBACK] Confirmation declined; disabling usbguard.service safely..."
+                toggle_notifier disable
+                run_root systemctl disable --now usbguard.service || true
+                echo "USBGuard has been disabled."
+                exit 1
+                ;;
+        esac
+    else
+        echo ""
+        echo "[ROLLBACK] 15-second timeout reached without confirmation; disabling usbguard.service..."
+        toggle_notifier disable
+        run_root systemctl disable --now usbguard.service || true
+        echo "USBGuard has been disabled automatically to prevent hardware lockout."
+        exit 1
+    fi
+}
+
+cmd_disable() {
+    require_not_live
+    echo "Disabling Kushagra Kavach USBGuard..."
+    toggle_notifier disable
+    run_root systemctl disable --now usbguard.service || true
+    echo "[PASS] usbguard.service disabled and stopped (Rule #9 safe mode)."
+}
+
+cmd_allow_connected() {
+    require_not_live
+    require_usbguard_bin
+
+    if systemctl is-active --quiet usbguard.service 2>/dev/null; then
+        local blocked_list dev_id allowed_count=0
+        blocked_list="$(run_root usbguard list-devices -b 2>/dev/null || true)"
+        if [ -z "$blocked_list" ]; then
+            echo "No blocked USB devices currently connected."
+            return 0
+        fi
+        while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            [ -n "$line" ] || continue
+            dev_id="${line%%:*}"
+            if [[ "$dev_id" =~ ^[0-9]+$ ]]; then
+                run_root usbguard allow-device "$dev_id" -p
+                echo "Permanently allowed device ${line}"
+                allowed_count=$((allowed_count + 1))
+            fi
+        done <<< "$blocked_list"
+
+        if command -v restorecon >/dev/null 2>&1; then
+            run_root restorecon -RF /etc/usbguard || true
+        fi
+        echo "[PASS] Permanently allowed ${allowed_count} connected USB device(s)."
+    else
+        echo "usbguard.service is not active; refreshing baseline policy in ${RULES_FILE}..."
+        local tmp_policy
+        tmp_policy="$(mktemp)"
+        trap 'rm -f "$tmp_policy"' RETURN
+
+        generate_safe_policy "$tmp_policy"
+        run_root install -d -m 0755 /etc/usbguard
+        run_root install -m 0600 "$tmp_policy" "$RULES_FILE"
+        if command -v restorecon >/dev/null 2>&1; then
+            run_root restorecon -RF /etc/usbguard || true
+        fi
+        echo "[OK] Baseline rules refreshed in ${RULES_FILE}. Run 'ujust setup-usbguard enable' to activate."
+    fi
+}
+
+cmd_status() {
+    echo "=== Kushagra Kavach USBGuard Status ==="
+    if is_live_session; then
+        echo "LiveCD Guard: ACTIVE (rd.live.image detected — USBGuard is blocked in LiveCD)"
+    fi
+
+    if ! command -v usbguard >/dev/null 2>&1; then
+        echo "usbguard binary: NOT INSTALLED"
+    else
+        echo "usbguard binary: $(command -v usbguard)"
+    fi
+
+    local enabled_state active_state
+    enabled_state="$(systemctl is-enabled usbguard.service 2>/dev/null || true)"
+    active_state="$(systemctl is-active usbguard.service 2>/dev/null || true)"
+    echo "usbguard.service: enabled=${enabled_state:-unknown}, active=${active_state:-unknown}"
+
+    if [ -s "$RULES_FILE" ]; then
+        if [ -r "$RULES_FILE" ]; then
+            echo "Rules File (${RULES_FILE}): present ($(wc -l < "$RULES_FILE") line(s))"
+        elif command -v usbguard >/dev/null 2>&1 && [ "$active_state" = "active" ]; then
+            local rule_cnt
+            rule_cnt="$(usbguard list-rules 2>/dev/null | wc -l || true)"
+            echo "Rules File (${RULES_FILE}): present (active rules: ${rule_cnt:-unknown})"
+        else
+            echo "Rules File (${RULES_FILE}): present (non-empty, mode 0600 root-only)"
+        fi
+    elif [ -f "$RULES_FILE" ]; then
+        echo "Rules File (${RULES_FILE}): present but EMPTY (service guarded off)"
+    else
+        echo "Rules File (${RULES_FILE}): not configured (disabled by default)"
+    fi
+}
+
+ACTION="${1:-status}"
+case "$ACTION" in
+    enable)
+        cmd_enable
+        ;;
+    disable)
+        cmd_disable
+        ;;
+    allow-connected)
+        cmd_allow_connected
+        ;;
+    status)
+        cmd_status
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        echo "ERROR: Unknown subcommand: $ACTION" >&2
+        usage >&2
+        exit 1
+        ;;
+esac

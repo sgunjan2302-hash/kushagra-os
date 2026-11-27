@@ -30,7 +30,40 @@ if compgen -G "/etc/sysctl.d/*.conf" > /dev/null; then
     chmod 0644 /etc/sysctl.d/*.conf
 fi
 
-for cfg in /etc/systemd/zram-generator.conf /etc/environment /etc/polkit-1/rules.d/50-kushagra-oobe.rules /etc/polkit-1/rules.d/50-kushagra-installer.rules /etc/anaconda/profile.d/kushagra-os.conf /etc/xdg/mimeapps.list /etc/systemd/system/system-flatpak-setup.service.d/10-skip-livecd.conf /etc/systemd/system/system-flatpak-setup.timer.d/10-skip-livecd.conf /etc/systemd/system/bootloader-update.service.d/10-kushagra-live-guard.conf; do
+for cfg in \
+    /etc/systemd/zram-generator.conf \
+    /etc/environment \
+    /etc/polkit-1/rules.d/50-kushagra-oobe.rules \
+    /etc/polkit-1/rules.d/50-kushagra-installer.rules \
+    /etc/polkit-1/rules.d/50-kushagra-kavach.rules \
+    /etc/anaconda/profile.d/kushagra-os.conf \
+    /etc/xdg/mimeapps.list \
+    /etc/xdg/kwinrc \
+    /etc/xdg/kglobalshortcutsrc \
+    /etc/xdg/kded6rc \
+    /etc/xdg/plasma-welcomerc \
+    /etc/xdg/autostart/org.kde.plasma-welcome.desktop \
+    /etc/systemd/resolved.conf.d/10-dot-opportunistic.conf \
+    /etc/systemd/system/system-flatpak-setup.service.d/10-skip-livecd.conf \
+    /etc/systemd/system/system-flatpak-setup.timer.d/10-skip-livecd.conf \
+    /etc/systemd/system/bootloader-update.service.d/10-kushagra-live-guard.conf \
+    /etc/systemd/system/usbguard.service.d/10-kushagra-safe.conf \
+    /etc/plymouth/plymouthd.conf \
+    /etc/dracut.conf.d/plymouth-kms.conf \
+    /usr/lib/bootc/kargs.d/10-kushagra-boot.toml \
+    /usr/lib/systemd/user/kushagra-installer.service \
+    /usr/lib/systemd/user/kushagra-oobe-ui.service \
+    /usr/lib/tmpfiles.d/kushagra-kavach.conf \
+    /usr/share/plymouth/themes/kushagra/kushagra.plymouth \
+    /usr/share/plymouth/themes/kushagra/watermark.png \
+    /usr/share/pixmaps/kushagra-logo.png \
+    /usr/share/kio/servicemenus/kushagra-kavach-scan.desktop \
+    /usr/share/applications/kushagra-apkrun.desktop \
+    /etc/skel/.config/kwinrc \
+    /etc/skel/.config/kglobalshortcutsrc \
+    /etc/skel/.config/fcitx5/profile \
+    /etc/skel/.config/plasma-welcomerc \
+    /etc/skel/.config/ksplashrc; do
     if [ -f "$cfg" ]; then
         chmod 0644 "$cfg"
     fi
@@ -44,16 +77,29 @@ for bin in \
     /usr/bin/kushagra-setup \
     /usr/bin/kushagra-installer \
     /usr/bin/kushagra-winrun \
+    /usr/bin/kushagra-apkrun \
+    /usr/bin/kushagra-kavach-scan \
     /usr/libexec/kushagra-setup-bootutil \
     /usr/libexec/kushagra-oobe-apply \
     /usr/libexec/kushagra-apply-user-layout \
     /usr/libexec/kushagra-installer-autostart \
-    /usr/libexec/kushagra-installer-backend; do
+    /usr/libexec/kushagra-installer-backend \
+    /usr/libexec/kushagra-kavach-dns \
+    /usr/libexec/kushagra-usbguard-setup \
+    /usr/libexec/kushagra-lan-mirror; do
     if [ -f "$bin" ]; then
         chmod 0755 "$bin"
         echo "Set 0755 permissions on $bin"
     fi
 done
+
+# Enable on-demand freshclam execution by neutralizing sample Example sentinel without baking /var DB
+if [ -f /etc/freshclam.conf ]; then
+    sed -i -E 's/^[[:space:]]*Example([[:space:]]|$)/#Example\1/' /etc/freshclam.conf
+fi
+
+# Strictly keep USBGuard opt-in (disabled by default until HID whitelist generated via ujust setup-usbguard)
+systemctl disable usbguard.service 2>/dev/null || true
 
 # Refresh desktop & MIME association caches for .exe/.msi WinRun and K-Installer handlers
 if command -v update-desktop-database >/dev/null 2>&1; then

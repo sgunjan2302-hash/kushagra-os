@@ -170,9 +170,9 @@ def main() -> int:
     handoff_script = (
         "systemctl stop plasmalogin.service 2>/dev/null || true; "
         "loginctl terminate-user kushagra-oobe 2>/dev/null || true; "
-        "for _ in $(seq 1 20); do "
+        "for _ in $(seq 1 50); do "
         "loginctl list-sessions --no-legend 2>/dev/null | grep -qE 'kushagra-oobe|plasmalogin' || break; "
-        "sleep 0.5; "
+        "sleep 0.2; "
         "done; "
         "udevadm settle --timeout=5 2>/dev/null || true; "
         "systemctl start plasmalogin.service"
@@ -180,7 +180,7 @@ def main() -> int:
     handoff_res = subprocess.run(
         [
             systemd_run_bin,
-            "--on-active=2",
+            "--on-active=1",
             "--unit=kushagra-oobe-handoff",
             "/bin/bash",
             "-c",

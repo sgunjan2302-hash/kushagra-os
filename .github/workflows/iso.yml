@@ -118,20 +118,78 @@ jobs:
       - name: Patch Titanoboa GRUB Template for Real Hardware EFI
         run: |
           set -euo pipefail
-          echo "Patching Titanoboa build_iso.sh to inject rmmod tpm and memory resilience..."
-          TITANOBOA_SCRIPT="$(find /home/runner/work/_actions/ublue-os/titanoboa -name "build_iso.sh" 2>/dev/null | head -n 1)"
-          if [ -n "$TITANOBOA_SCRIPT" ] && [ -f "$TITANOBOA_SCRIPT" ]; then
-            echo "Found Titanoboa build script at: $TITANOBOA_SCRIPT"
-            # Inject rmmod tpm right before load_video in the GRUB template
-            sed -i '/function load_video/i rmmod tpm' "$TITANOBOA_SCRIPT"
-            # Ensure grubx64.efi is in /work/EFI/BOOT and remove fbx64.efi
-            sed -i '/cp -avT \/rootfs\/boot\/efi\/EFI \/work\/EFI/a \cp -vf /work/EFI/fedora/grubx64.efi /work/EFI/BOOT/grubx64.efi || true\nrm -vf /work/EFI/BOOT/fbx64.efi /work/EFI/fedora/fbx64.efi /work/EFI/fedora/BOOTX64.CSV || true' "$TITANOBOA_SCRIPT"
-            echo "Verification of patched Titanoboa build script:"
-            grep -n -C 5 "rmmod tpm" "$TITANOBOA_SCRIPT" || true
-          else
-            echo "Titanoboa script search in /home/runner/work/_actions/:"
-            find /home/runner/work/_actions/ -name "*.sh" || true
+          echo "Patching Titanoboa build_iso.sh for rmmod tpm, silent hidden GRUB, and EFI resilience..."
+          TITANOBOA_SCRIPT="$(find /home/runner/work/_actions/ublue-os/titanoboa -name "build_iso.sh" 2>/dev/null | head -n 1 || true)"
+          if [ -z "$TITANOBOA_SCRIPT" ] || [ ! -f "$TITANOBOA_SCRIPT" ]; then
+            echo "ERROR: Could not locate Titanoboa build_iso.sh under /home/runner/work/_actions/ublue-os/titanoboa" >&2
+            find /home/runner/work/_actions/ -name "*.sh" 2>/dev/null || true
+            exit 1
           fi
+          echo "Found Titanoboa build script at: $TITANOBOA_SCRIPT"
+          python3 - "$TITANOBOA_SCRIPT" <<'PY'
+          import re
+          import sys
+
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
+
+          # 1. Inject rmmod tpm right before function load_video in the GRUB template
+          if "rmmod tpm" not in text:
+              text, n_tpm = re.subn(
+                  r"^([ \t]*function load_video\b)",
+                  r"rmmod tpm\n\1",
+                  text,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+              if n_tpm != 1:
+                  raise SystemExit("ERROR: Could not find 'function load_video' in Titanoboa build_iso.sh")
+
+          # 2. Replace hardcoded set menu_auto_hide=false with Esc-interruptible silent hidden timeout (UEFI grubx64.efi)
+          # Verified Fedora 44 runtime facts:
+          # - keystatus.mod is NOT shipped in Fedora 44 UEFI grubx64.efi, so NEVER use keystatus --shift.
+          # - In GNU GRUB 2.12, timeout=0 skips keyboard polling so Esc cannot interrupt boot.
+          # - Keeping iso.yaml timeout: 1 + set timeout_style=hidden + set gfxpayload=keep hides the menu cleanly
+          #   while still letting Esc open the troubleshooting menu (proven on Fedora 44 QEMU).
+          hidden_grub_block = (
+              "set timeout_style=hidden\n"
+              "set gfxpayload=keep"
+          )
+          text, n_hide = re.subn(
+              r"""^[ \t]*set[ \t]+menu_auto_hide[ \t]*=[ \t]*(?:false|"false"|'false')[ \t]*$""",
+              hidden_grub_block,
+              text,
+              flags=re.MULTILINE,
+          )
+          if n_hide == 0:
+              raise SystemExit("ERROR: Could not find 'set menu_auto_hide=false' in Titanoboa build_iso.sh")
+
+          # 3. Ensure grubx64.efi is in /work/EFI/BOOT and purge fbx64.efi / BOOTX64.CSV
+          if "/work/EFI/BOOT/grubx64.efi" not in text:
+              text, n_efi = re.subn(
+                  r"^([ \t]*cp -avT /rootfs/boot/efi/EFI /work/EFI[ \t]*)$",
+                  (
+                      r"\1\n"
+                      r"cp -vf /work/EFI/fedora/grubx64.efi /work/EFI/BOOT/grubx64.efi || true\n"
+                      r"rm -vf /work/EFI/BOOT/fbx64.efi /work/EFI/fedora/fbx64.efi /work/EFI/fedora/BOOTX64.CSV || true"
+                  ),
+                  text,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+              if n_efi != 1:
+                  raise SystemExit("ERROR: Could not find 'cp -avT /rootfs/boot/efi/EFI /work/EFI' in Titanoboa build_iso.sh")
+
+          with open(path, "w", encoding="utf-8", newline="\n") as f:
+              f.write(text)
+          PY
+          grep -q 'rmmod tpm' "$TITANOBOA_SCRIPT"
+          grep -q 'timeout_style=hidden' "$TITANOBOA_SCRIPT"
+          grep -q '/work/EFI/BOOT/grubx64.efi' "$TITANOBOA_SCRIPT"
+          echo "Verification of patched Titanoboa build script:"
+          grep -n -C 5 "rmmod tpm" "$TITANOBOA_SCRIPT"
+          grep -n -C 5 "timeout_style=hidden" "$TITANOBOA_SCRIPT"
 
       - name: Generate LiveCD ISO with Titanoboa
         # Uses Titanoboa composite action to build a bootc bootable LiveCD ISO

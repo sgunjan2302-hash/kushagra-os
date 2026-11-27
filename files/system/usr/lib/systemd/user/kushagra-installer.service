@@ -1,0 +1,16 @@
+[Unit]
+Description=Kushagra OS Live Installer Kiosk
+ConditionKernelCommandLine=rd.live.image
+ConditionUser=liveuser
+PartOf=graphical-session.target
+After=plasma-kwin_wayland.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/kushagra-installer-autostart
+KillMode=process
+Restart=no
+Slice=app.slice
+
+[Install]
+WantedBy=plasma-workspace-wayland.target

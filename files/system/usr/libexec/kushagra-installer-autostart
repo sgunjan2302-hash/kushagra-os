@@ -10,11 +10,44 @@ if [ "$(id -un)" != "liveuser" ]; then
     exit 0
 fi
 
-# Show automatically once per live session so "Try Live Desktop" stays cleanly on desktop
+# Show automatically once per live session so "Try Live Desktop" stays cleanly on desktop;
+# atomic noclobber lock ensures systemd user unit and XDG autostart never double-launch under race.
 LAUNCH_FLAG="${XDG_RUNTIME_DIR:-/tmp}/kushagra-installer-autostarted"
-if [ -e "${LAUNCH_FLAG}" ]; then
-    exit 0
+( set -o noclobber; : > "${LAUNCH_FLAG}" ) 2>/dev/null || exit 0
+
+# If launched early via systemd user unit before kwin_wayland finishes exporting env, wait briefly for Wayland socket
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
+    RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    for _ in $(seq 1 50); do
+        env_wayland="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^WAYLAND_DISPLAY=//p' | head -n1 || true)"
+        if [ -n "${env_wayland}" ] && [ -S "${RUNTIME_DIR}/${env_wayland}" ]; then
+            export WAYLAND_DISPLAY="${env_wayland}"
+            break
+        fi
+        for sock in "${RUNTIME_DIR}"/wayland-*; do
+            if [ -S "${sock}" ]; then
+                export WAYLAND_DISPLAY="$(basename "${sock}")"
+                break 2
+            fi
+        done
+        sleep 0.1
+    done
+    if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
+        rm -f "${LAUNCH_FLAG}" 2>/dev/null || true
+        exit 1
+    fi
 fi
-touch "${LAUNCH_FLAG}"
+
+if [ -z "${XDG_SESSION_TYPE:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    export XDG_SESSION_TYPE="wayland"
+fi
+if [ -z "${DISPLAY:-}" ]; then
+    env_display="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^DISPLAY=//p' | head -n1 || true)"
+    [ -n "${env_display}" ] && export DISPLAY="${env_display}"
+fi
+if [ -z "${XAUTHORITY:-}" ]; then
+    env_xauth="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^XAUTHORITY=//p' | head -n1 || true)"
+    [ -n "${env_xauth}" ] && export XAUTHORITY="${env_xauth}"
+fi
 
 exec /usr/bin/kushagra-installer

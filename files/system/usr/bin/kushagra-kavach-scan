@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra Kavach - On-Demand ClamAV Malware Scanner (4 GB RAM Safe)
+# Uses on-demand freshclam + clamscan with zero background clamd daemon.
+
+DB_DIR="/var/lib/clamav"
+STALE_SECONDS=86400
+SKIP_UPDATE=0
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-kavach-scan [--no-update] [PATH ...]
+
+Options:
+  --no-update, --offline  Skip signature refresh and scan using existing local database.
+  -h, --help              Show this help message.
+
+Defaults to current directory (.) if no PATH is provided.
+Supports multiple file and directory arguments (e.g., Dolphin %F).
+EOF
+}
+
+has_local_db() {
+    compgen -G "${DB_DIR}/*.c[vl]d" >/dev/null 2>&1
+}
+
+newest_db_mtime() {
+    local newest=0
+    local db_file mtime
+    local candidates=()
+
+    if compgen -G "${DB_DIR}/daily.c[vl]d" >/dev/null 2>&1; then
+        candidates=("${DB_DIR}"/daily.c[vl]d)
+    elif compgen -G "${DB_DIR}/*.c[vl]d" >/dev/null 2>&1; then
+        candidates=("${DB_DIR}"/*.c[vl]d)
+    else
+        echo "0"
+        return 0
+    fi
+
+    for db_file in "${candidates[@]}"; do
+        [ -e "$db_file" ] || continue
+        mtime="$(stat -c %Y "$db_file" 2>/dev/null || echo 0)"
+        if [ "$mtime" -gt "$newest" ]; then
+            newest="$mtime"
+        fi
+    done
+    echo "$newest"
+}
+
+run_freshclam_privileged() {
+    local fc_cmd='set -e; install -d -m 0755 /var/lib/clamav; if id clamupdate >/dev/null 2>&1; then chown -R clamupdate:clamupdate /var/lib/clamav; fi; if command -v timeout >/dev/null 2>&1; then timeout 480 freshclam; else freshclam; fi'
+
+    if [ "$(id -u)" -eq 0 ]; then
+        bash -c "$fc_cmd"
+    elif [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+        sudo -v
+        sudo bash -c "$fc_cmd"
+    elif command -v pkexec >/dev/null 2>&1; then
+        pkexec bash -c "$fc_cmd"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo bash -c "$fc_cmd"
+    else
+        echo "ERROR: Root privileges (sudo or pkexec) required to run freshclam." >&2
+        return 1
+    fi
+}
+
+TARGETS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-update|--offline)
+            SKIP_UPDATE=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            while [ $# -gt 0 ]; do
+                if [ -z "$1" ]; then
+                    echo "[FAIL] Empty scan target path rejected." >&2
+                    exit 1
+                fi
+                TARGETS+=("$1")
+                shift
+            done
+            break
+            ;;
+        -*)
+            echo "ERROR: Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+        *)
+            if [ -z "$1" ]; then
+                echo "[FAIL] Empty scan target path rejected." >&2
+                exit 1
+            fi
+            TARGETS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ "${#TARGETS[@]}" -eq 0 ]; then
+    TARGETS=(".")
+fi
+
+missing_target=0
+for target in "${TARGETS[@]}"; do
+    if [ -z "$target" ]; then
+        echo "[FAIL] Empty scan target path rejected." >&2
+        missing_target=1
+    elif [ ! -e "$target" ]; then
+        echo "[FAIL] Target does not exist: ${target}" >&2
+        missing_target=1
+    fi
+done
+if [ "$missing_target" -ne 0 ]; then
+    exit 1
+fi
+
+if ! command -v clamscan >/dev/null 2>&1; then
+    echo "[FAIL] 'clamscan' command not found. Ensure the 'clamav' package is installed." >&2
+    exit 1
+fi
+
+echo "================================================================================"
+echo "                   Kushagra Kavach On-Demand Malware Scanner                    "
+echo "================================================================================"
+
+needs_update=0
+update_reason=""
+if ! has_local_db; then
+    needs_update=1
+    update_reason="No ClamAV signature database found in ${DB_DIR}."
+else
+    now_epoch="$(date +%s)"
+    db_epoch="$(newest_db_mtime)"
+    if [ "$db_epoch" -eq 0 ] || [ $((now_epoch - db_epoch)) -gt "$STALE_SECONDS" ]; then
+        needs_update=1
+        update_reason="Local ClamAV signatures are older than 24 hours."
+    fi
+fi
+
+if [ "$SKIP_UPDATE" -eq 1 ]; then
+    if ! has_local_db; then
+        echo "[FAIL] --no-update specified, but no local ClamAV database exists in ${DB_DIR}." >&2
+        echo "Connect to the internet and run 'kushagra-kavach-scan' without --no-update first." >&2
+        exit 1
+    fi
+    echo "[INFO] Skipping signature update (--no-update); using local signatures in ${DB_DIR}."
+elif [ "$needs_update" -eq 1 ]; then
+    echo "[INFO] ${update_reason}"
+    if ! command -v freshclam >/dev/null 2>&1; then
+        if has_local_db; then
+            echo "[WARN] 'freshclam' not found; scanning offline with existing local signatures."
+        else
+            echo "[FAIL] 'freshclam' not found and no local ClamAV database exists in ${DB_DIR}." >&2
+            exit 1
+        fi
+    else
+        echo "[INFO] Refreshing malware signatures on-demand via freshclam..."
+        if run_freshclam_privileged; then
+            echo "[PASS] ClamAV signature database updated cleanly."
+        else
+            if has_local_db; then
+                echo "[WARN] Signature refresh failed (offline, mirror unreachable, or authorization cancelled)."
+                echo "[WARN] Falling back gracefully to existing local signatures in ${DB_DIR}."
+            else
+                echo "[FAIL] Signature download failed and no local database exists in ${DB_DIR}." >&2
+                echo "Action required: Verify internet connectivity (check 'ujust kavach-dns status') and run 'sudo freshclam', then retry." >&2
+                exit 1
+            fi
+        fi
+    fi
+else
+    echo "[INFO] Local ClamAV signatures in ${DB_DIR} are up to date (< 24h)."
+fi
+
+clean_count=0
+warn_count=0
+infected_count=0
+
+for target in "${TARGETS[@]}"; do
+    echo ""
+    echo "--- Scanning: ${target} ---"
+    rc=0
+    clamscan --recursive=yes --infected -- "${target}" || rc=$?
+    case "$rc" in
+        0)
+            echo "[PASS] Clean (0 threats): ${target}"
+            clean_count=$((clean_count + 1))
+            ;;
+        1)
+            echo "[INFECTED] Malware threat detected in: ${target}"
+            infected_count=$((infected_count + 1))
+            ;;
+        *)
+            echo "[WARN] Scanner reported error/warning (exit ${rc}) on: ${target}"
+            warn_count=$((warn_count + 1))
+            ;;
+    esac
+done
+
+echo ""
+echo "================================================================================"
+echo "Kavach Scan Summary: PASS: ${clean_count} | WARN: ${warn_count} | INFECTED: ${infected_count}"
+echo "4 GB RAM Note: On-demand clamscan frees all signature memory immediately on exit (no clamd)."
+echo "================================================================================"
+
+if [ "$infected_count" -gt 0 ]; then
+    exit 1
+fi
+if [ "$warn_count" -gt 0 ]; then
+    exit 2
+fi
+exit 0

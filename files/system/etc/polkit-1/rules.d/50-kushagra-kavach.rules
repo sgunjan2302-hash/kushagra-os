@@ -1,0 +1,25 @@
+// Allow active local wheel users to inspect USBGuard state via desktop notifiers
+// and authorize/modify USB device policies with cached admin authentication.
+polkit.addRule(function (action, subject) {
+    if (action.id.indexOf("org.usbguard.") !== 0 && action.id.indexOf("org.usbguard1.") !== 0) {
+        return;
+    }
+    if (!subject.active || !subject.local || !subject.isInGroup("wheel")) {
+        return;
+    }
+
+    var readOnlyActions = [
+        "org.usbguard.Devices1.listDevices",
+        "org.usbguard.Devices1.listen",
+        "org.usbguard.Policy1.listRules",
+        "org.usbguard1.listDevices",
+        "org.usbguard1.listen",
+        "org.usbguard1.listRules"
+    ];
+
+    if (readOnlyActions.indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+
+    return polkit.Result.AUTH_ADMIN_KEEP;
+});
