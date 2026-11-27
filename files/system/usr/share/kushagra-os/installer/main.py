@@ -7,8 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, QTimer, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtCore import QEventLoop, QObject, QSize, QThread, QTimer, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QGuiApplication, QWindow
 from PyQt6.QtQml import QQmlApplicationEngine
 
 sys.path.insert(0, "/usr/share/kushagra-os/installer")
@@ -294,6 +294,141 @@ class InstallerBackend(QObject):
         subprocess.run(["systemctl", "reboot"], check=False)
 
 
+def _is_real_screen(s) -> bool:
+    """Return True only when QScreen represents a real non-placeholder output."""
+    return (
+        s is not None
+        and bool(s.name().strip())
+        and s.geometry().width() > 0
+        and s.geometry().height() > 0
+    )
+
+
+def _wait_for_real_screen(app: QGuiApplication, timeout_ms: int = 3000) -> None:
+    """Wait briefly for kscreen/Wayland output initialization before mapping."""
+    if any(_is_real_screen(s) for s in app.screens()):
+        return
+
+    loop = QEventLoop()
+    waiting = {"active": True}
+    seen_placeholders = set()
+    placeholder_conns = []
+
+    def _check_ready(screen=None):
+        if not waiting["active"]:
+            return
+        if _is_real_screen(screen) or any(_is_real_screen(s) for s in app.screens()):
+            waiting["active"] = False
+            loop.quit()
+        elif screen is not None:
+            _watch_placeholder(screen)
+
+    def _watch_placeholder(sc):
+        if sc is None or id(sc) in seen_placeholders:
+            return
+        seen_placeholders.add(id(sc))
+
+        def _on_geo(_geo, s=sc):
+            _check_ready(s)
+
+        sc.geometryChanged.connect(_on_geo)
+        placeholder_conns.append((sc, _on_geo))
+
+    app.screenAdded.connect(_check_ready)
+    for existing in app.screens():
+        _watch_placeholder(existing)
+
+    QTimer.singleShot(timeout_ms, loop.quit)
+    loop.exec()
+    waiting["active"] = False
+    try:
+        app.screenAdded.disconnect(_check_ready)
+    except Exception:
+        pass
+    for sc, slot in placeholder_conns:
+        try:
+            sc.geometryChanged.disconnect(slot)
+        except Exception:
+            pass
+
+
+def _bind_fullscreen_sync(app: QGuiApplication, win: QWindow) -> None:
+    """Bind screen/output listeners and synchronize fullscreen geometry on Wayland."""
+    state = {"busy": False, "reconfigs": 0}
+    connected_screens = set()
+
+    def _pick_target():
+        for screen in app.screens():
+            if _is_real_screen(screen):
+                return screen
+        return app.primaryScreen()
+
+    def _attach_screen(s):
+        if s is None or id(s) in connected_screens:
+            return
+        connected_screens.add(id(s))
+        s.geometryChanged.connect(sync_fullscreen)
+        s.virtualGeometryChanged.connect(sync_fullscreen)
+        s.physicalDotsPerInchChanged.connect(sync_fullscreen)
+
+    def sync_fullscreen(*_args):
+        if state["busy"]:
+            return
+        state["busy"] = True
+        try:
+            target = _pick_target()
+            if target is None:
+                if not win.isVisible():
+                    win.showFullScreen()
+                return
+
+            _attach_screen(target)
+            target_geo = target.geometry()
+            has_valid_geo = target_geo.width() > 0 and target_geo.height() > 0
+
+            needs_sync = (
+                not win.isVisible()
+                or win.visibility() != QWindow.Visibility.FullScreen
+                or (has_valid_geo and win.geometry() != target_geo)
+                or win.screen() != target
+            )
+            if not needs_sync:
+                return
+
+            win.setMinimumSize(QSize(0, 0))
+            win.setScreen(target)
+
+            if win.isVisible() and state["reconfigs"] < 8 and has_valid_geo and win.geometry() != target_geo:
+                state["reconfigs"] += 1
+                win.setVisibility(QWindow.Visibility.Windowed)
+                win.setGeometry(target_geo)
+                QTimer.singleShot(0, win.showFullScreen)
+            else:
+                if has_valid_geo:
+                    win.setGeometry(target_geo)
+                win.showFullScreen()
+        finally:
+            state["busy"] = False
+
+    def _on_screen_event(screen=None):
+        _attach_screen(screen)
+        sync_fullscreen()
+
+    for screen in app.screens():
+        _attach_screen(screen)
+    _attach_screen(app.primaryScreen())
+
+    app.screenAdded.connect(_on_screen_event)
+    app.screenRemoved.connect(sync_fullscreen)
+    app.primaryScreenChanged.connect(_on_screen_event)
+    win.screenChanged.connect(_on_screen_event)
+
+    sync_fullscreen()
+    QTimer.singleShot(500, sync_fullscreen)
+    QTimer.singleShot(1500, sync_fullscreen)
+    QTimer.singleShot(3000, sync_fullscreen)
+
+
 def main() -> int:
     preview_mode = "--preview" in sys.argv
     app = QGuiApplication(sys.argv)
@@ -325,10 +460,11 @@ def main() -> int:
         return 1
 
     win = engine.rootObjects()[0]
-    if hasattr(win, "showFullScreen"):
+    _wait_for_real_screen(app, timeout_ms=3000)
+    if isinstance(win, QWindow):
+        _bind_fullscreen_sync(app, win)
+    elif hasattr(win, "showFullScreen"):
         win.showFullScreen()
-        QTimer.singleShot(250, win.showFullScreen)
-        QTimer.singleShot(1000, win.showFullScreen)
 
     return app.exec()
 

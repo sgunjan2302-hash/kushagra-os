@@ -195,9 +195,26 @@ set timeout=5
 set timeout_style=menu
 terminal_output console
 
+rmmod tpm
+insmod part_gpt
+insmod gzio
+insmod btrfs
+insmod ext2
+function load_video {
+    insmod all_video
+}
+load_video
+set gfxpayload=keep
+
 menuentry "Kushagra OS 44 (${KVER})" --class fedora --class gnu-linux --class gnu --class os {
     search --no-floppy --fs-uuid --set=root ${GRUB_BOOT_UUID}
-    linux ${BOOT_PREFIX}/vmlinuz-${KVER} root=UUID=${ROOT_UUID} rootfstype=btrfs rootflags=subvol=root rw quiet splash
+    linux ${BOOT_PREFIX}/vmlinuz-${KVER} root=UUID=${ROOT_UUID} rootfstype=btrfs rootflags=subvol=root rw rhgb quiet console=ttyS0 console=tty0
+    initrd ${BOOT_PREFIX}/initramfs-${KVER}.img
+}
+
+menuentry "Kushagra OS 44 (${KVER} · Verbose Logs)" --class fedora --class gnu-linux --class gnu --class os {
+    search --no-floppy --fs-uuid --set=root ${GRUB_BOOT_UUID}
+    linux ${BOOT_PREFIX}/vmlinuz-${KVER} root=UUID=${ROOT_UUID} rootfstype=btrfs rootflags=subvol=root rw console=ttyS0 console=tty0
     initrd ${BOOT_PREFIX}/initramfs-${KVER}.img
 }
 EOF

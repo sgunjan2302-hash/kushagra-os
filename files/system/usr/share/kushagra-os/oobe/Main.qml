@@ -5,11 +5,9 @@ import QtQuick.Layouts
 
 Window {
     id: root
-    visible: true
+    visible: false
     visibility: Window.FullScreen
-    flags: Qt.FramelessWindowHint | Qt.Window
-    width: 1280
-    height: 800
+    flags: Qt.Window
     color: "#060913"
     title: "Kushagra OS Setup"
 
@@ -22,8 +20,6 @@ Window {
     property bool showPassword: false
     property bool setupDoneBanner: false
     property bool isHindi: selectedLanguage === "hi_IN"
-
-    Component.onCompleted: root.showFullScreen()
 
     onCurrentStepChanged: {
         if (currentStep === 3) {
@@ -780,8 +776,9 @@ Window {
 
                 GlassButton {
                     visible: root.currentStep > 0 && !(oobeBackend && oobeBackend.applyBusy) && !root.setupDoneBanner
+                    focusPolicy: Qt.NoFocus
                     text: isHindi ? "← पीछे" : "← Back"
-                    onClicked: root.currentStep -= 1
+                    onClicked: if (root.currentStep > 0) root.currentStep -= 1
                 }
 
                 Item { Layout.fillWidth: true }

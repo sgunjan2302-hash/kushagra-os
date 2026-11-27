@@ -5,11 +5,9 @@ import QtQuick.Layouts
 
 Window {
     id: root
-    visible: true
+    visible: false
     visibility: Window.FullScreen
-    flags: Qt.FramelessWindowHint | Qt.Window
-    width: 1280
-    height: 800
+    flags: Qt.Window
     color: "#060913"
     title: "Kushagra OS Installer"
 

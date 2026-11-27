@@ -346,12 +346,16 @@ try:
     has_v021_oobe = (
         'QQuickStyle.setStyle("Basic")' in oobe_main_txt
         and 'parent=engine' in oobe_main_txt
+        and 'sync_fullscreen' in oobe_main_txt
+        and '_is_real_screen' in oobe_main_txt
         and 'kushagra-oobe-handoff' in oobe_apply_txt
         and 'systemctl stop plasmalogin.service' in oobe_apply_txt
         and 'systemctl start plasmalogin.service' in oobe_apply_txt
         and 'qdbus-qt6' in layout_sh_txt
         and '(`wheel`)' not in qml_text
         and 'focusPolicy: Qt.NoFocus' in qml_text
+        and 'visible: false' in qml_text
+        and 'Qt.FramelessWindowHint' not in qml_text
         and 'Math.min(3' in qml_text
         and 'plasma-plasmashell.service' in tmpfiles_text
         and 'org.kde.discover.notifier.desktop' in tmpfiles_text
@@ -414,6 +418,7 @@ try:
     ks_txt = open('files/system/usr/share/kushagra-os/installer/ks_builder.py', 'r', encoding='utf-8').read()
     backend_txt = open('files/system/usr/libexec/kushagra-installer-backend', 'r', encoding='utf-8').read()
     runner_txt = open('files/system/usr/share/kushagra-os/installer/anaconda_runner.py', 'r', encoding='utf-8').read()
+    inst_main_txt = open('files/system/usr/share/kushagra-os/installer/main.py', 'r', encoding='utf-8').read()
     inst_qml = open('files/system/usr/share/kushagra-os/installer/Main.qml', 'r', encoding='utf-8').read()
     livesys_extra = open('files/system/usr/share/kushagra-os/livesys/livesys-session-extra', 'r', encoding='utf-8').read()
 
@@ -438,6 +443,11 @@ try:
         and 'efibootmgr' in ks_txt
         and '/boot/efi/EFI/fedora/grub.cfg' in ks_txt
         and '/boot/efi/EFI/BOOT/grub.cfg' in ks_txt
+        and 'rmmod tpm' in ks_txt
+        and 'load_video' in ks_txt
+        and 'set gfxpayload=keep' in ks_txt
+        and 'rw rhgb quiet console=ttyS0 console=tty0' in ks_txt
+        and 'Verbose Logs' in ks_txt
         and 'in (eng)' in ks_txt
         and 'graphical.target' in ks_txt
         and 'setfiles' in ks_txt
@@ -454,7 +464,13 @@ try:
         and 'can_reboot' in runner_txt
         and 'can_activate_keyboard' in runner_txt
     )
-    has_qml_screens = all(k in inst_qml for k in ['Install Kushagra OS', 'Try Live Desktop', 'installLogsText', 'espLowSpace'])
+    has_qml_screens = (
+        all(k in inst_qml for k in ['Install Kushagra OS', 'Try Live Desktop', 'installLogsText', 'espLowSpace'])
+        and 'visible: false' in inst_qml
+        and 'Qt.FramelessWindowHint' not in inst_qml
+        and 'sync_fullscreen' in inst_main_txt
+        and '_is_real_screen' in inst_main_txt
+    )
     has_livesys_kiosk = (
         'kushagra-installer.desktop' in livesys_extra
         and 'org.kde.plasma-welcome.desktop' in livesys_extra
