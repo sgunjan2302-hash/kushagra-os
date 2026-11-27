@@ -307,7 +307,7 @@ def main() -> int:
     app.setOrganizationName("Kushagra OS")
 
     engine = QQmlApplicationEngine()
-    backend = OobeBackend(preview_mode=preview_mode)
+    backend = OobeBackend(preview_mode=preview_mode, parent=engine)
     resolved = Path(__file__).resolve()
     logo_candidates = [
         Path("/usr/share/kushagra-os/branding/logo-symbol.svg"),
@@ -324,6 +324,12 @@ def main() -> int:
     engine.load(QUrl.fromLocalFile(str(qml_path)))
     if not engine.rootObjects():
         return 1
+
+    win = engine.rootObjects()[0]
+    if hasattr(win, "showFullScreen"):
+        win.showFullScreen()
+        QTimer.singleShot(250, win.showFullScreen)
+        QTimer.singleShot(1000, win.showFullScreen)
 
     return app.exec()
 

@@ -181,6 +181,10 @@ set prefix=(\$dev)${BOOT_PREFIX}/grub2
 export prefix
 configfile \$prefix/grub.cfg
 EOF
+if [ ! -f /boot/efi/EFI/BOOT/grub.cfg ]; then
+    mkdir -p /boot/efi/EFI/BOOT
+    cp -f /boot/efi/EFI/fedora/grub.cfg /boot/efi/EFI/BOOT/grub.cfg
+fi
 
 mkdir -p /boot/grub2
 rm -f /boot/grub2/grubenv
@@ -235,14 +239,19 @@ touch /var/lib/kushagra-oobe-pending /etc/plasma-setup-done
 chmod 0644 /var/lib/kushagra-oobe-pending /etc/plasma-setup-done
 systemctl disable plasma-setup.service 2>/dev/null || true
 systemctl enable kushagra-oobe.service 2>/dev/null || true
-restorecon -RF /etc /boot /var/lib 2>/dev/null || true
+systemctl set-default graphical.target || ln -sf /usr/lib/systemd/system/graphical.target /etc/systemd/system/default.target
+if [ -x /usr/sbin/setfiles ] && [ -f /etc/selinux/targeted/contexts/files/file_contexts ]; then
+    /usr/sbin/setfiles -F /etc/selinux/targeted/contexts/files/file_contexts /etc /usr /var /boot 2>/dev/null || true
+else
+    restorecon -RF /etc /usr /var /boot 2>/dev/null || true
+fi
 %end"""
 
     lines = [
         "# Generated automatically by Kushagra OS K-Installer (v0.2.1)",
         "cmdline",
         'liveimg --url="file:///run/initramfs/live/LiveOS/squashfs.img"',
-        "keyboard --xlayouts='in'",
+        "keyboard --xlayouts='in (eng)'",
         "lang en_IN.UTF-8",
         "timezone Asia/Kolkata --utc",
         "",

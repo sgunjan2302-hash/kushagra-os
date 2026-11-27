@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QThread, QTimer, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtQml import QQmlApplicationEngine
 
@@ -306,8 +306,8 @@ def main() -> int:
     except Exception:
         pass
 
-    backend = InstallerBackend(preview_mode=preview_mode)
     engine = QQmlApplicationEngine()
+    backend = InstallerBackend(preview_mode=preview_mode, parent=engine)
 
     base_dir = Path(__file__).resolve().parent
     logo_path = Path("/usr/share/kushagra-os/branding/logo-symbol.svg")
@@ -323,6 +323,12 @@ def main() -> int:
     engine.load(QUrl.fromLocalFile(str(qml_path)))
     if not engine.rootObjects():
         return 1
+
+    win = engine.rootObjects()[0]
+    if hasattr(win, "showFullScreen"):
+        win.showFullScreen()
+        QTimer.singleShot(250, win.showFullScreen)
+        QTimer.singleShot(1000, win.showFullScreen)
 
     return app.exec()
 

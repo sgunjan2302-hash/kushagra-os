@@ -32,6 +32,172 @@ MILESTONE_RULES = [
     (95, "Configuring Stage 2 OOBE handoff & security seals...", ("kushagra_post: arming stage 2 oobe", "kushagra-oobe-pending")),
 ]
 
+RSYNC_WRAPPER_SCRIPT = r"""#!/usr/bin/env python3
+'''Transient rsync wrapper for Anaconda liveimg transfers into sysroot.'''
+
+import errno
+import os
+import stat
+import subprocess
+import sys
+
+REAL_RSYNC = "/usr/bin/rsync"
+
+VALUE_LONG_OPTS = {
+    "--rsh", "--rsync-path", "--suffix", "--backup-dir", "--compare-dest",
+    "--copy-dest", "--link-dest", "--chmod", "--chown", "--usermap",
+    "--groupmap", "--exclude", "--exclude-from", "--include",
+    "--include-from", "--files-from", "--filter", "--temp-dir",
+    "--partial-dir", "--log-file", "--log-file-format", "--out-format",
+    "--bwlimit", "--timeout", "--contimeout", "--address", "--port",
+    "--sockopts", "--password-file", "--block-size", "--modify-window",
+    "--max-size", "--min-size", "--max-delete", "--info", "--debug",
+    "--iconv", "--skip-compress", "--compress-level", "--checksum-choice",
+    "--csum-choice", "--stop-after", "--stop-at", "--remote-option",
+    "--early-input", "--max-alloc", "--outbuf",
+}
+VALUE_SHORT_OPTS = set("BefMT")
+IGNORED_XATTR_ERRNOS = {
+    code
+    for name in ("ENODATA", "ENOTSUP", "EOPNOTSUPP", "ENOENT")
+    if (code := getattr(errno, name, None)) is not None
+}
+
+
+def _strip_xattr_flags(args: list[str]) -> tuple[list[str], list[str]]:
+    '''Return (filtered_args, positional_args) with -X/--xattrs stripped.'''
+    filtered: list[str] = []
+    positional: list[str] = []
+    after_double_dash = False
+    expect_value = False
+
+    for arg in args:
+        if after_double_dash:
+            filtered.append(arg)
+            positional.append(arg)
+            continue
+
+        if expect_value:
+            filtered.append(arg)
+            expect_value = False
+            continue
+
+        if arg == "--":
+            after_double_dash = True
+            filtered.append(arg)
+            continue
+
+        if arg.startswith("--"):
+            if arg == "--xattrs":
+                continue
+            filtered.append(arg)
+            if "=" not in arg and arg in VALUE_LONG_OPTS:
+                expect_value = True
+            continue
+
+        if arg.startswith("-") and arg != "-":
+            kept: list[str] = []
+            idx = 1
+            while idx < len(arg):
+                ch = arg[idx]
+                if ch in VALUE_SHORT_OPTS:
+                    kept.append(arg[idx:])
+                    if idx == len(arg) - 1:
+                        expect_value = True
+                    break
+                if ch != "X":
+                    kept.append(ch)
+                idx += 1
+            if kept:
+                filtered.append("-" + "".join(kept))
+            continue
+
+        filtered.append(arg)
+        positional.append(arg)
+
+    return filtered, positional
+
+
+def _is_sysroot_target(path: str, sysroots: set[str]) -> bool:
+    norm = os.path.normpath(path)
+    return any(norm == sr or norm.startswith(sr + os.sep) for sr in sysroots)
+
+
+def _prepare_target_dirs(dst_root: str) -> None:
+    '''Pre-create atomic/boot directories needed by Anaconda post tasks.'''
+    os.makedirs(os.path.join(dst_root, "boot", "grub2"), exist_ok=True)
+    os.makedirs(os.path.join(dst_root, "var", "lib", "os-prober", "mount"), exist_ok=True)
+
+    roothome = os.path.join(dst_root, "var", "roothome")
+    os.makedirs(roothome, mode=0o700, exist_ok=True)
+    os.chmod(roothome, 0o700)
+
+    vartmp = os.path.join(dst_root, "var", "tmp")
+    os.makedirs(vartmp, mode=0o1777, exist_ok=True)
+    os.chmod(vartmp, 0o1777)
+
+    for subdir in ("log", "lib", "opt", "srv", "mnt", "spool", "cache"):
+        os.makedirs(os.path.join(dst_root, "var", subdir), exist_ok=True)
+
+
+def _copy_usr_capabilities(src_root: str, dst_root: str) -> None:
+    '''Preserve security.capability xattrs across /usr regular files.'''
+    src_usr = os.path.join(src_root, "usr")
+    dst_usr = os.path.join(dst_root, "usr")
+    if not (os.path.isdir(src_usr) and os.path.isdir(dst_usr)):
+        return
+
+    for dirpath, _dirnames, filenames in os.walk(src_usr, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, src_usr)
+        dst_dir_path = dst_usr if rel_dir == "." else os.path.join(dst_usr, rel_dir)
+        for name in filenames:
+            src_file = os.path.join(dirpath, name)
+            dst_file = os.path.join(dst_dir_path, name)
+            try:
+                src_st = os.lstat(src_file)
+                if not stat.S_ISREG(src_st.st_mode):
+                    continue
+                cap = os.getxattr(src_file, "security.capability", follow_symlinks=False)
+                dst_st = os.lstat(dst_file)
+                if not stat.S_ISREG(dst_st.st_mode):
+                    continue
+                os.setxattr(dst_file, "security.capability", cap, follow_symlinks=False)
+            except OSError as exc:
+                if exc.errno in IGNORED_XATTR_ERRNOS:
+                    continue
+                raise
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    env_sysroot = (os.environ.get("ANACONDA_SYSROOT") or "/mnt/sysroot").strip() or "/mnt/sysroot"
+    sysroots = {"/mnt/sysroot", os.path.normpath(env_sysroot)}
+
+    filtered_args, positional = _strip_xattr_flags(args)
+    targeting_sysroot = len(positional) >= 2 and _is_sysroot_target(positional[-1], sysroots)
+
+    if not targeting_sysroot:
+        os.execv(REAL_RSYNC, [REAL_RSYNC, *args])
+
+    res = subprocess.run([REAL_RSYNC, *filtered_args], check=False)
+    if res.returncode != 0:
+        return res.returncode
+
+    dst_root = positional[-1].rstrip("/") or "/"
+    _prepare_target_dirs(dst_root)
+    for src_arg in positional[:-1]:
+        src_root = src_arg.rstrip("/") or "/"
+        _copy_usr_capabilities(src_root, dst_root)
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
 
 def emit_progress(percent: int, stage: str, log_lines=None) -> None:
     payload = {"percent": percent, "stage": stage, "logs": log_lines or []}
@@ -100,14 +266,14 @@ def run_install(payload: dict) -> int:
     env.setdefault("ANACONDA_PRODUCTNAME", "Kushagra OS")
     env.setdefault("ANACONDA_PRODUCTVERSION", "44")
     env.setdefault("ANACONDA_ISFINAL", "true")
-    env["PATH"] = f"/sbin:/usr/sbin:{env.get('PATH', '')}"
 
-    prev_selinux = ""
-    if os.path.exists("/usr/sbin/getenforce") and os.path.exists("/usr/sbin/setenforce"):
-        res_se = subprocess.run(["/usr/sbin/getenforce"], capture_output=True, text=True, check=False)
-        prev_selinux = res_se.stdout.strip()
-        if prev_selinux == "Enforcing":
-            subprocess.run(["/usr/sbin/setenforce", "0"], capture_output=True, check=False)
+    wrapper_bin_dir = os.path.join(RUN_DIR, "bin")
+    rsync_wrapper_path = os.path.join(wrapper_bin_dir, "rsync")
+    existing_path = env.get("PATH", "")
+    path_parts = [wrapper_bin_dir, "/sbin", "/usr/sbin"]
+    if existing_path:
+        path_parts.append(existing_path)
+    env["PATH"] = ":".join(path_parts)
 
     # Track current log byte offsets so we only stream new lines generated during this run
     offsets = {}
@@ -115,7 +281,8 @@ def run_install(payload: dict) -> int:
         offsets[lp] = os.path.getsize(lp) if os.path.exists(lp) else 0
 
     cmd = [
-        "/usr/bin/anaconda",
+        "/usr/bin/python3",
+        "/usr/share/kushagra-os/installer/anaconda_runner.py",
         "--cmdline",
         "--profile",
         "kushagra-os",
@@ -124,8 +291,21 @@ def run_install(payload: dict) -> int:
     ]
     emit_progress(8, "Starting Anaconda non-interactive installation backend...", [f"Command: {' '.join(cmd)}"])
 
+    prev_selinux = ""
     ret = 1
+    percent = 10
     try:
+        os.makedirs(wrapper_bin_dir, exist_ok=True)
+        with open(rsync_wrapper_path, "w", encoding="utf-8", newline="\n") as rfp:
+            rfp.write(RSYNC_WRAPPER_SCRIPT)
+        os.chmod(rsync_wrapper_path, 0o755)
+
+        if os.path.exists("/usr/sbin/getenforce") and os.path.exists("/usr/sbin/setenforce"):
+            res_se = subprocess.run(["/usr/sbin/getenforce"], capture_output=True, text=True, check=False)
+            prev_selinux = res_se.stdout.strip()
+            if prev_selinux == "Enforcing":
+                subprocess.run(["/usr/sbin/setenforce", "0"], capture_output=True, check=False)
+
         with open(LOG_PATH, "w", encoding="utf-8") as log_fp:
             proc = subprocess.Popen(
                 cmd,
@@ -137,7 +317,6 @@ def run_install(payload: dict) -> int:
             )
             os.set_blocking(proc.stdout.fileno(), False)
 
-            percent = 10
             stage = "Preparing Anaconda installer modules..."
             last_heartbeat = time.monotonic()
             last_creep = last_heartbeat
@@ -214,12 +393,19 @@ def run_install(payload: dict) -> int:
                     break
 
                 time.sleep(0.5)
+
+        if ret != 0 and os.path.exists(LOG_PATH):
+            try:
+                shutil.copy2(LOG_PATH, "/tmp/kushagra-install.log")
+            except Exception:
+                pass
     finally:
         if prev_selinux == "Enforcing" and os.path.exists("/usr/sbin/setenforce"):
             subprocess.run(["/usr/sbin/setenforce", "1"], capture_output=True, check=False)
+        shutil.rmtree(RUN_DIR, ignore_errors=True)
 
     if ret != 0:
-        emit_progress(percent, f"Anaconda exited with error code {ret}", [f"FATAL: anaconda failed with code {ret}. Inspect /run/kushagra-installer/install.log and /tmp/anaconda.log."])
+        emit_progress(percent, f"Anaconda exited with error code {ret}", [f"FATAL: anaconda failed with code {ret}. Inspect /tmp/kushagra-install.log and /tmp/anaconda.log."])
         return ret
 
     emit_progress(100, "Kushagra OS installed cleanly! Ready to restart into Setup Wizard.", [

@@ -23,6 +23,14 @@ Window {
     property bool setupDoneBanner: false
     property bool isHindi: selectedLanguage === "hi_IN"
 
+    Component.onCompleted: root.showFullScreen()
+
+    onCurrentStepChanged: {
+        if (currentStep === 3) {
+            fullNameField.forceActiveFocus()
+        }
+    }
+
     palette.windowText: "#FFFFFF"
     palette.text: "#FFFFFF"
     palette.buttonText: "#FFFFFF"
@@ -234,7 +242,7 @@ Window {
             StackLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                currentIndex: root.currentStep
+                currentIndex: Math.min(3, Math.max(0, root.currentStep))
 
                 // =============================================================
                 // SCREEN 1: Welcome & Language
@@ -355,7 +363,7 @@ Window {
                                 color: "#FFFFFF"; font.pixelSize: 26; font.weight: Font.Bold
                             }
                             Text {
-                                text: oobeBackend.wifiStatus.length > 0
+                                text: (oobeBackend && oobeBackend.wifiStatus.length > 0)
                                       ? oobeBackend.wifiStatus
                                       : (isHindi ? "आप इंटरनेट के बिना भी सेटअप पूरा कर सकते हैं।" : "Connect to Wi-Fi via NetworkManager or skip to finish setup offline.")
                                 color: "#94A3B8"; font.pixelSize: 13
@@ -363,9 +371,9 @@ Window {
                         }
                         Item { Layout.fillWidth: true }
                         GlassButton {
-                            text: oobeBackend.wifiBusy ? (isHindi ? "स्कैन..." : "Scanning...") : (isHindi ? "रीफ्रेश" : "Refresh")
-                            enabled: !oobeBackend.wifiBusy
-                            onClicked: oobeBackend.scanWifi()
+                            text: (oobeBackend && oobeBackend.wifiBusy) ? (isHindi ? "स्कैन..." : "Scanning...") : (isHindi ? "रीफ्रेश" : "Refresh")
+                            enabled: Boolean(oobeBackend && !oobeBackend.wifiBusy)
+                            onClicked: if (oobeBackend) oobeBackend.scanWifi()
                         }
                     }
 
@@ -382,7 +390,7 @@ Window {
                             anchors.fill: parent
                             anchors.margins: 8
                             spacing: 6
-                            model: oobeBackend.wifiList
+                            model: oobeBackend ? oobeBackend.wifiList : []
 
                             delegate: Rectangle {
                                 width: wifiListView.width
@@ -417,7 +425,7 @@ Window {
                                     onClicked: {
                                         root.selectedSsid = modelData.ssid
                                         root.selectedSsidSecured = modelData.secured
-                                        if (!modelData.secured) {
+                                        if (!modelData.secured && oobeBackend) {
                                             oobeBackend.connectWifi(modelData.ssid, "")
                                         }
                                     }
@@ -427,7 +435,7 @@ Window {
 
                         Text {
                             anchors.centerIn: parent
-                            visible: oobeBackend.wifiList.length === 0 && !oobeBackend.wifiBusy
+                            visible: Boolean(oobeBackend && oobeBackend.wifiList.length === 0 && !oobeBackend.wifiBusy)
                             text: isHindi
                                   ? "कोई Wi-Fi नेटवर्क नहीं मिला (Ethernet पहले से जुड़ा हो सकता है या बिना नेटवर्क आगे बढ़ें)"
                                   : "No Wi-Fi networks found (Ethernet may already be connected, or click Skip for now)."
@@ -455,8 +463,8 @@ Window {
                         }
                         GlassButton {
                             text: isHindi ? "कनेक्ट करें" : "Connect"
-                            enabled: !oobeBackend.wifiBusy
-                            onClicked: oobeBackend.connectWifi(root.selectedSsid, wifiPasswordField.text)
+                            enabled: Boolean(oobeBackend && !oobeBackend.wifiBusy)
+                            onClicked: if (oobeBackend) oobeBackend.connectWifi(root.selectedSsid, wifiPasswordField.text)
                         }
                     }
                 }
@@ -651,7 +659,7 @@ Window {
                                     border.width: 1
                                 }
                                 onTextChanged: {
-                                    if (!root.usernameManuallyEdited) {
+                                    if (!root.usernameManuallyEdited && oobeBackend) {
                                         usernameField.text = oobeBackend.suggestUsername(text)
                                     }
                                 }
@@ -732,14 +740,14 @@ Window {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 42
                         radius: 10
-                        visible: oobeBackend.setupError.length > 0 || (confirmField.text.length > 0 && confirmField.text !== passwordField.text)
+                        visible: Boolean(oobeBackend && oobeBackend.setupError.length > 0) || (confirmField.text.length > 0 && confirmField.text !== passwordField.text)
                         color: "#33EF4444"
                         border.color: "#EF4444"
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: parent.left; anchors.leftMargin: 12
                             color: "#FCA5A5"; font.pixelSize: 12
-                            text: oobeBackend.setupError.length > 0
+                            text: (oobeBackend && oobeBackend.setupError.length > 0)
                                   ? oobeBackend.setupError
                                   : (isHindi ? "दोनों पासवर्ड मेल नहीं खा रहे हैं।" : "Passwords do not match.")
                         }
@@ -747,7 +755,7 @@ Window {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        visible: oobeBackend.applyBusy || root.setupDoneBanner
+                        visible: Boolean(oobeBackend && oobeBackend.applyBusy) || root.setupDoneBanner
                         spacing: 12
                         BusyIndicator { running: true; Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
                         Text {
@@ -771,7 +779,7 @@ Window {
                 spacing: 12
 
                 GlassButton {
-                    visible: root.currentStep > 0 && !oobeBackend.applyBusy && !root.setupDoneBanner
+                    visible: root.currentStep > 0 && !(oobeBackend && oobeBackend.applyBusy) && !root.setupDoneBanner
                     text: isHindi ? "← पीछे" : "← Back"
                     onClicked: root.currentStep -= 1
                 }
@@ -779,19 +787,23 @@ Window {
                 Item { Layout.fillWidth: true }
 
                 GlassButton {
-                    visible: root.currentStep === 1 && !oobeBackend.applyBusy
+                    visible: root.currentStep === 1 && !(oobeBackend && oobeBackend.applyBusy)
                     text: isHindi ? "अभी छोड़ें (Skip)" : "Skip for now"
                     onClicked: root.currentStep = 2
                 }
 
                 GlassButton {
                     visible: root.currentStep < 3
+                    enabled: root.currentStep < 3
+                    focusPolicy: Qt.NoFocus
                     text: isHindi ? "आगे बढ़ें →" : "Continue →"
                     highlighted: true
                     onClicked: {
-                        root.currentStep += 1
-                        if (root.currentStep === 1 && oobeBackend.wifiList.length === 0) {
-                            oobeBackend.scanWifi()
+                        if (root.currentStep < 3) {
+                            root.currentStep += 1
+                            if (root.currentStep === 1 && oobeBackend && oobeBackend.wifiList.length === 0) {
+                                oobeBackend.scanWifi()
+                            }
                         }
                     }
                 }
@@ -799,17 +811,19 @@ Window {
                 GlassButton {
                     visible: root.currentStep === 3
                     highlighted: true
-                    enabled: !oobeBackend.applyBusy && !root.setupDoneBanner && passwordField.text.length >= 4 && passwordField.text === confirmField.text && usernameField.text.trim().length > 0
+                    enabled: Boolean(oobeBackend && !oobeBackend.applyBusy) && !root.setupDoneBanner && passwordField.text.length >= 4 && passwordField.text === confirmField.text && usernameField.text.trim().length > 0
                     text: isHindi ? "सेटअप पूरा करें ✓" : "Complete Setup ✓"
                     onClicked: {
-                        oobeBackend.finishSetup(
-                            fullNameField.text,
-                            usernameField.text,
-                            passwordField.text,
-                            autoLoginSwitch.checked,
-                            root.selectedWorkspace,
-                            root.selectedLanguage
-                        )
+                        if (oobeBackend) {
+                            oobeBackend.finishSetup(
+                                fullNameField.text,
+                                usernameField.text,
+                                passwordField.text,
+                                autoLoginSwitch.checked,
+                                root.selectedWorkspace,
+                                root.selectedLanguage
+                            )
+                        }
                     }
                 }
             }

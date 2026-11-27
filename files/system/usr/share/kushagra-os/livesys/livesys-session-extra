@@ -36,6 +36,21 @@ Hidden=true
 DRKONQI_EOF
 ln -sf /dev/null /home/liveuser/.config/systemd/user/drkonqi-coredump-launcher.socket
 
+# Disable idle screen locking and display sleep/blanking during LiveCD install (liveuser has no password)
+cat << 'KSCREENLOCKER_EOF' > /home/liveuser/.config/kscreenlockerrc
+[Daemon]
+Autolock=false
+LockOnResume=false
+KSCREENLOCKER_EOF
+
+cat << 'POWERDEVIL_EOF' > /home/liveuser/.config/autostart/powerdevil.desktop
+[Desktop Entry]
+Type=Application
+Name=Power Management
+Hidden=true
+POWERDEVIL_EOF
+ln -sf /dev/null /home/liveuser/.config/systemd/user/plasma-powerdevil.service
+
 # Replace generic liveinst Desktop icon with branded Kushagra K-Installer shortcut on LiveCD
 rm -f /home/liveuser/Desktop/liveinst.desktop /home/liveuser/.local/share/applications/liveinst.desktop /home/liveuser/.config/autostart/liveinst.desktop
 if [ -f /usr/share/applications/kushagra-installer.desktop ]; then

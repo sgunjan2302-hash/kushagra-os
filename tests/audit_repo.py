@@ -345,9 +345,17 @@ try:
     layout_sh_txt = open('files/system/usr/libexec/kushagra-apply-user-layout', 'r', encoding='utf-8').read()
     has_v021_oobe = (
         'QQuickStyle.setStyle("Basic")' in oobe_main_txt
+        and 'parent=engine' in oobe_main_txt
         and 'kushagra-oobe-handoff' in oobe_apply_txt
+        and 'systemctl stop plasmalogin.service' in oobe_apply_txt
+        and 'systemctl start plasmalogin.service' in oobe_apply_txt
         and 'qdbus-qt6' in layout_sh_txt
         and '(`wheel`)' not in qml_text
+        and 'focusPolicy: Qt.NoFocus' in qml_text
+        and 'Math.min(3' in qml_text
+        and 'plasma-plasmashell.service' in tmpfiles_text
+        and 'org.kde.discover.notifier.desktop' in tmpfiles_text
+        and 'org.kde.panel' not in tmpfiles_text
     )
     has_all_screens = all(k in qml_text for k in ['en_IN', 'hi_IN', 'nmcli', 'Familiar Mode', 'Studio Mode', 'autoLoginSwitch', 'oobeBackend.finishSetup'])
 
@@ -383,6 +391,7 @@ try:
         'files/system/usr/share/kushagra-os/installer/Main.qml',
         'files/system/usr/share/kushagra-os/installer/storage_probe.py',
         'files/system/usr/share/kushagra-os/installer/ks_builder.py',
+        'files/system/usr/share/kushagra-os/installer/anaconda_runner.py',
     ]
     missing_inst = [p for p in required_installer_files if not os.path.exists(p)]
 
@@ -390,6 +399,7 @@ try:
         'files/system/usr/share/kushagra-os/installer/main.py',
         'files/system/usr/share/kushagra-os/installer/storage_probe.py',
         'files/system/usr/share/kushagra-os/installer/ks_builder.py',
+        'files/system/usr/share/kushagra-os/installer/anaconda_runner.py',
         'files/system/usr/libexec/kushagra-installer-backend',
     ]:
         if os.path.exists(py_path):
@@ -403,6 +413,7 @@ try:
     probe_txt = open('files/system/usr/share/kushagra-os/installer/storage_probe.py', 'r', encoding='utf-8').read()
     ks_txt = open('files/system/usr/share/kushagra-os/installer/ks_builder.py', 'r', encoding='utf-8').read()
     backend_txt = open('files/system/usr/libexec/kushagra-installer-backend', 'r', encoding='utf-8').read()
+    runner_txt = open('files/system/usr/share/kushagra-os/installer/anaconda_runner.py', 'r', encoding='utf-8').read()
     inst_qml = open('files/system/usr/share/kushagra-os/installer/Main.qml', 'r', encoding='utf-8').read()
     livesys_extra = open('files/system/usr/share/kushagra-os/livesys/livesys-session-extra', 'r', encoding='utf-8').read()
 
@@ -426,6 +437,10 @@ try:
         and 'grub2-editenv' in ks_txt
         and 'efibootmgr' in ks_txt
         and '/boot/efi/EFI/fedora/grub.cfg' in ks_txt
+        and '/boot/efi/EFI/BOOT/grub.cfg' in ks_txt
+        and 'in (eng)' in ks_txt
+        and 'graphical.target' in ks_txt
+        and 'setfiles' in ks_txt
         and 'vmlinuz' in ks_txt
         and not re.search(r'^\s*user\s+', ks_txt, re.MULTILINE)
     )
@@ -434,6 +449,10 @@ try:
         and '--cmdline' in backend_txt
         and '--kickstart' in backend_txt
         and 'DBUS_SESSION_BUS_ADDRESS' in backend_txt
+        and 'anaconda_runner.py' in backend_txt
+        and 'security.capability' in backend_txt
+        and 'can_reboot' in runner_txt
+        and 'can_activate_keyboard' in runner_txt
     )
     has_qml_screens = all(k in inst_qml for k in ['Install Kushagra OS', 'Try Live Desktop', 'installLogsText', 'espLowSpace'])
     has_livesys_kiosk = (
@@ -442,6 +461,8 @@ try:
         and 'chown -R liveuser:liveuser /home/liveuser' in livesys_extra
         and 'plasma-welcomerc' in livesys_extra
         and 'drkonqi' in livesys_extra
+        and 'kscreenlockerrc' in livesys_extra
+        and 'plasma-powerdevil.service' in livesys_extra
     )
 
     if not missing_inst and has_live_gate and has_profile and has_safety_locks and has_ks_handoff and has_anaconda_cmd and has_qml_screens and has_livesys_kiosk:

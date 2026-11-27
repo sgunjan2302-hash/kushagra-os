@@ -159,11 +159,24 @@ def main() -> int:
     if shutil.which("restorecon"):
         subprocess.run(["restorecon", "-RF", home_dir], check=False)
 
-    # 5. Schedule delayed DRM/VT-safe handoff BEFORE wiping OOBE state so failures remain recoverable
+    # 5. Verify systemd-run, configure plasmalogin, and schedule DRM/VT-safe handoff
+    # BEFORE marking OOBE_DONE / removing OOBE_FLAG so errors remain recoverable
     systemd_run_bin = shutil.which("systemd-run")
     if not systemd_run_bin:
         raise RuntimeError("systemd-run not found; cannot schedule OOBE session handoff.")
 
+    configure_plasmalogin(username, autologin)
+
+    handoff_script = (
+        "systemctl stop plasmalogin.service 2>/dev/null || true; "
+        "loginctl terminate-user kushagra-oobe 2>/dev/null || true; "
+        "for _ in $(seq 1 20); do "
+        "loginctl list-sessions --no-legend 2>/dev/null | grep -qE 'kushagra-oobe|plasmalogin' || break; "
+        "sleep 0.5; "
+        "done; "
+        "udevadm settle --timeout=5 2>/dev/null || true; "
+        "systemctl start plasmalogin.service"
+    )
     handoff_res = subprocess.run(
         [
             systemd_run_bin,
@@ -171,7 +184,7 @@ def main() -> int:
             "--unit=kushagra-oobe-handoff",
             "/bin/bash",
             "-c",
-            "loginctl terminate-user kushagra-oobe 2>/dev/null || true; sleep 2; systemctl restart plasmalogin.service",
+            handoff_script,
         ],
         text=True,
         capture_output=True,
@@ -180,8 +193,7 @@ def main() -> int:
         detail = (handoff_res.stderr or handoff_res.stdout or f"exit {handoff_res.returncode}").strip()
         raise RuntimeError(f"Failed to schedule OOBE handoff via systemd-run: {detail}")
 
-    # 6. Update plasmalogin, mark OOBE complete permanently, and disable OOBE service
-    configure_plasmalogin(username, autologin)
+    # 6. Mark OOBE complete permanently and disable OOBE service
     with open("/etc/plasma-setup-done", "w", encoding="utf-8") as fp:
         fp.write("done\n")
     os.chmod("/etc/plasma-setup-done", 0o644)
