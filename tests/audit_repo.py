@@ -1366,6 +1366,7 @@ try:
 
     has_ci_oci = (
         "chunkah: 'true'" in build_raw
+        and build_raw.count("max_layers: '92'") == 4
         and "squash: 'false'" in build_raw
         and "build_chunked_oci: 'false'" in build_raw
         and 'rechunk:' not in build_raw
