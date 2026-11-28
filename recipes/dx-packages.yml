@@ -9,12 +9,12 @@ install:
     - code
 
     # --- Container & Developer Virtualization Stack ---
+    # Note: omit podman-docker because docker-ce conflicts with it; podman & distrobox coexist cleanly.
     - distrobox
     - podman
     - podman-compose
-    - podman-docker
 
-    # --- Optional Docker CE Stack (skipped gracefully if docker-ce.repo unavailable on Fedora 44) ---
+    # --- Optional Docker CE Stack (opt-in socket via ujust dx-group) ---
     - docker-ce
     - docker-ce-cli
     - containerd.io
@@ -22,7 +22,6 @@ install:
     - docker-compose-plugin
 
     # --- Universal Blue COPR DX Utilities ---
-    - bbrew
     - krunner-bazaar
 
     # --- Developer Productivity Essentials ---
