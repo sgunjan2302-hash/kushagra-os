@@ -954,15 +954,26 @@ try:
     script_list_v4 = modules_v4[script_idx_v4].get('scripts', []) if script_idx_v4 >= 0 else []
 
     glass_build_sh = open('files/scripts/04-build-kwin-glass.sh', 'r', encoding='utf-8').read()
+    glass_toggle_sh_txt = open('files/system/usr/bin/kushagra-glass-toggle', 'r', encoding='utf-8').read()
     has_glass_build = (
         0 <= script_idx_v4 < initramfs_idx_v4
         and '04-build-kwin-glass.sh' in script_list_v4
-        and 'kwin-devel' in glass_build_sh
+        and 'kwin-effects-better-blur-dx' not in glass_build_sh
+        and all(dep in glass_build_sh for dep in [
+            'kwin-devel',
+            'kf6-kguiaddons-devel',
+            'kdecoration-devel',
+            'libplasma-devel',
+            'qt6-qtbase-private-devel',
+            'plasma-wayland-protocols-devel',
+        ])
         and 'dnf5 remove' in glass_build_sh
         and 'jq|' in glass_build_sh
         and 'copr enable' not in glass_build_sh.lower()
         and 'copr.fedorainfracloud.org' not in glass_build_sh.lower()
         and 'stock-blur-fallback' in glass_build_sh
+        and 'kwinrc_set "Plugins" "blurEnabled" "false"' in glass_toggle_sh_txt
+        and 'reconfigureEffect' in glass_toggle_sh_txt
     )
 
     kdeglobals_txt = open('files/system/etc/xdg/kdeglobals', 'r', encoding='utf-8').read()
@@ -1013,9 +1024,43 @@ try:
 
     pkgs_cfg_v4 = yaml.safe_load(open('recipes/packages.yml', 'r', encoding='utf-8'))
     pkgs_v4 = pkgs_cfg_v4.get('install', {}).get('packages', [])
-    has_kai_pkgs = all(
-        p in pkgs_v4
-        for p in ['llama-cpp', 'vulkan-tools', 'tesseract', 'tesseract-langpack-hin', 'spectacle', 'wl-clipboard', 'python3-gobject']
+    recipe_cfg_k4 = yaml.safe_load(open('recipes/recipe.yml', 'r', encoding='utf-8'))
+    modules_k4 = recipe_cfg_k4.get('modules', [])
+    script_idx_k4 = next((i for i, m in enumerate(modules_k4) if m.get('type') == 'script'), -1)
+    initramfs_idx_k4 = next((i for i, m in enumerate(modules_k4) if m.get('type') == 'initramfs'), -1)
+    script_list_k4 = modules_k4[script_idx_k4].get('scripts', []) if script_idx_k4 >= 0 else []
+    llama_build_path = 'files/scripts/05-build-llama-vulkan.sh'
+    llama_build_sh = open(llama_build_path, 'r', encoding='utf-8').read() if os.path.exists(llama_build_path) else ''
+    has_kai_pkgs = (
+        'llama-cpp' not in pkgs_v4
+        and all(
+            p in pkgs_v4
+            for p in ['vulkan-loader', 'vulkan-tools', 'libgomp', 'tesseract', 'tesseract-langpack-hin', 'spectacle', 'wl-clipboard', 'python3-gobject']
+        )
+        and 0 <= script_idx_k4 < initramfs_idx_k4
+        and '05-build-llama-vulkan.sh' in script_list_k4
+        and all(tok in llama_build_sh for tok in [
+            'LLAMA_TAG="b12823"',
+            '-DGGML_VULKAN=ON',
+            '-DGGML_NATIVE=OFF',
+            '-DGGML_HIP=OFF',
+            '-DGGML_CUDA=OFF',
+            '-DLLAMA_CURL=OFF',
+            '-DLLAMA_BUILD_TESTS=OFF',
+            '-DLLAMA_BUILD_EXAMPLES=OFF',
+            '-DBUILD_SHARED_LIBS=ON',
+            '--target llama-server',
+            'spirv-headers-devel',
+            'glslc',
+            '/usr/bin/llama-server',
+            'strip --strip-unneeded',
+            'dnf5 remove',
+            'jq|',
+            'vulkan-loader',
+            '--list-devices',
+        ])
+        and 'copr enable' not in llama_build_sh.lower()
+        and 'copr.fedorainfracloud.org' not in llama_build_sh.lower()
     )
 
     kai_py_files = [

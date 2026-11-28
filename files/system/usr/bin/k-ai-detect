@@ -230,6 +230,11 @@ def classify_hardware(
             gpu_layers = 99
             gpu_backend = "vulkan"
             offload_note = f"full Vulkan GPU offload (gpu_layers={gpu_layers}, VRAM={vram_val:.2f} GiB)"
+        elif effective_vulkan:
+            hybrid_offload = True
+            gpu_layers = 16
+            gpu_backend = "vulkan"
+            offload_note = f"integrated Vulkan iGPU+CPU offload (gpu_layers={gpu_layers}, shared RAM)"
         else:
             hybrid_offload = False
             gpu_layers = 0
@@ -255,6 +260,11 @@ def classify_hardware(
             gpu_layers = 99
             gpu_backend = "vulkan"
             offload_note = f"full Vulkan GPU offload (gpu_layers={gpu_layers}, VRAM={vram_val:.2f} GiB)"
+        elif effective_vulkan:
+            hybrid_offload = True
+            gpu_layers = 24
+            gpu_backend = "vulkan"
+            offload_note = f"integrated Vulkan iGPU+CPU offload (gpu_layers={gpu_layers}, shared RAM)"
         else:
             hybrid_offload = False
             gpu_layers = 0

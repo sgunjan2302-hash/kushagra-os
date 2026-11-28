@@ -56,8 +56,10 @@ install:
     - python3-gobject
 
     # --- K-AI Hybrid Inference Engine & Multimodal Utilities ---
-    - llama-cpp
+    # Note: llama-server (Vulkan+CPU) is built cleanly in Hook 05 without Fedora's ROCm/HIP bloat
+    - vulkan-loader
     - vulkan-tools
+    - libgomp
     - tesseract
     - tesseract-langpack-hin
     - spectacle

@@ -508,7 +508,14 @@ def probe_llama_caps(binary: str, profile: dict[str, Any]) -> dict[str, Any]:
                 )
                 dev_txt = ((dev_proc.stdout or "") + "\n" + (dev_proc.stderr or "")).lower()
                 if dev_proc.returncode == 0 and dev_txt.strip():
-                    caps["vulkan_runtime_detected"] = "vulkan" in dev_txt
+                    hw_vk = False
+                    for line in dev_txt.splitlines():
+                        if "vulkan" in line and not any(
+                            sw in line for sw in ("llvmpipe", "lavapipe", "swiftshader", "softpipe")
+                        ):
+                            hw_vk = True
+                            break
+                    caps["vulkan_runtime_detected"] = hw_vk
             except (OSError, subprocess.SubprocessError):
                 pass
 
@@ -677,7 +684,7 @@ class EngineState:
         binary = discover_llama_server()
         if not binary:
             raise RuntimeError(
-                "llama-server binary not found. Ensure the 'llama-cpp' package is installed."
+                "llama-server binary not found (expected /usr/bin/llama-server with Vulkan/CPU backend)."
             )
 
         caps = probe_llama_caps(binary, profile)

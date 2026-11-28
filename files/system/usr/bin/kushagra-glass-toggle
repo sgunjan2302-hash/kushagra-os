@@ -120,6 +120,10 @@ PYEOF
     fi
 }
 
+has_dedicated_plugin() {
+    [ -n "${BACKEND_PLUGIN}" ] && [ "${BACKEND_PLUGIN}" != "blur" ] && [ "${BACKEND_NAME}" != "stock-blur-fallback" ]
+}
+
 reconfigure_kwin() {
     local qdbus_bin=""
     local candidate
@@ -131,10 +135,13 @@ reconfigure_kwin() {
     done
 
     if [ -n "${qdbus_bin}" ]; then
+        local -a prefix=()
         if command -v timeout >/dev/null 2>&1; then
-            timeout 2 "${qdbus_bin}" org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
-        else
-            "${qdbus_bin}" org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+            prefix=(timeout 2)
+        fi
+        "${prefix[@]}" "${qdbus_bin}" org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+        if has_dedicated_plugin; then
+            "${prefix[@]}" "${qdbus_bin}" org.kde.KWin /Effects org.kde.kwin.Effects.reconfigureEffect "${BACKEND_PLUGIN}" >/dev/null 2>&1 || true
         fi
     fi
 }
@@ -142,9 +149,14 @@ reconfigure_kwin() {
 apply_glass_state() {
     local enabled="$1" # "true" or "false"
 
-    kwinrc_set "Plugins" "blurEnabled" "${enabled}"
-    if [ -n "${BACKEND_PLUGIN}" ] && [ "${BACKEND_PLUGIN}" != "blur" ]; then
+    if has_dedicated_plugin; then
+        # Prevent stock KWin blur conflict with upstream kwin-effects-glass / forceblur plugins
+        kwinrc_set "Plugins" "blurEnabled" "false"
         kwinrc_set "Plugins" "${BACKEND_PLUGIN}Enabled" "${enabled}"
+        kwinrc_set "Effect-blurplus" "BlurStrength" "6"
+        kwinrc_set "Effect-blurplus" "NoiseStrength" "2"
+    else
+        kwinrc_set "Plugins" "blurEnabled" "${enabled}"
     fi
     # Always keep stock Translucency off to preserve opaque readable text interiors
     kwinrc_set "Plugins" "kwin4_effect_translucencyEnabled" "false"
@@ -161,19 +173,26 @@ print_status() {
     mode="$(read_mode_pref)"
     blur_cfg="$(kwinrc_get "Plugins" "blurEnabled" "unset")"
     plugin_cfg="unset"
-    if [ -n "${BACKEND_PLUGIN}" ] && [ "${BACKEND_PLUGIN}" != "blur" ]; then
+    if has_dedicated_plugin; then
         plugin_cfg="$(kwinrc_get "Plugins" "${BACKEND_PLUGIN}Enabled" "unset")"
     fi
     translucency_cfg="$(kwinrc_get "Plugins" "kwin4_effect_translucencyEnabled" "unset")"
-    blur_strength="$(kwinrc_get "Effect-blur" "BlurStrength" "6")"
-    noise_strength="$(kwinrc_get "Effect-blur" "NoiseStrength" "2")"
-
-    if [ "${blur_cfg}" = "false" ] || [ "${plugin_cfg}" = "false" ]; then
-        enabled="false"
-    elif [ "${blur_cfg}" = "true" ] || [ "${plugin_cfg}" = "true" ]; then
-        enabled="true"
+    if has_dedicated_plugin; then
+        blur_strength="$(kwinrc_get "Effect-blurplus" "BlurStrength" "6")"
+        noise_strength="$(kwinrc_get "Effect-blurplus" "NoiseStrength" "2")"
+        if [ "${plugin_cfg}" = "true" ]; then
+            enabled="true"
+        else
+            enabled="false"
+        fi
     else
-        enabled="true"
+        blur_strength="$(kwinrc_get "Effect-blur" "BlurStrength" "6")"
+        noise_strength="$(kwinrc_get "Effect-blur" "NoiseStrength" "2")"
+        if [ "${blur_cfg}" = "false" ]; then
+            enabled="false"
+        else
+            enabled="true"
+        fi
     fi
 
     guard_reason="none"

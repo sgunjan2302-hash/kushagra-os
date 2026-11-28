@@ -19,6 +19,7 @@ modules:
       - 02-system-tuning.sh
       - 03-configure-plymouth-theme.sh
       - 04-build-kwin-glass.sh
+      - 05-build-llama-vulkan.sh
 
   - type: systemd
     system:
