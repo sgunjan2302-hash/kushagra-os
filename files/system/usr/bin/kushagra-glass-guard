@@ -84,8 +84,19 @@ detect_gpu_renderer() {
         fi
     done
     if [ -n "${qdbus_bin}" ]; then
-        local kwin_info="" kwin_renderer="" kwin_comp=""
+        local kwin_info="" kwin_renderer="" kwin_comp="" kwin_wait=0 attempt=0
         kwin_info="$(run_with_timeout "${qdbus_bin}" org.kde.KWin /KWin supportInformation 2>/dev/null || true)"
+        if [ -z "${kwin_info}" ]; then
+            # kushagra-glass-guard runs After=plasma-kwin_wayland.service, where D-Bus name registration can lag briefly.
+            if { command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet plasma-kwin_wayland.service 2>/dev/null; } || [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+                kwin_wait=1
+            fi
+            while [ "${kwin_wait}" -eq 1 ] && [ -z "${kwin_info}" ] && [ "${attempt}" -lt 12 ]; do
+                attempt=$((attempt + 1))
+                sleep 0.5
+                kwin_info="$(run_with_timeout "${qdbus_bin}" org.kde.KWin /KWin supportInformation 2>/dev/null || true)"
+            done
+        fi
         if [ -n "${kwin_info}" ]; then
             kwin_renderer="$(printf '%s\n' "${kwin_info}" | awk '/OpenGL renderer string|GL Renderer/ { sub(/^[^:]+:[[:space:]]*/, ""); gsub(/[[:space:]]+$/, ""); print; exit }' || true)"
             kwin_comp="$(printf '%s\n' "${kwin_info}" | awk '/Compositing Type/ { sub(/^[^:]+:[[:space:]]*/, ""); gsub(/[[:space:]]+$/, ""); print; exit }' || true)"

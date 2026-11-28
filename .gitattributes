@@ -1,6 +1,8 @@
 # Set default behavior to automatically normalize line endings
 * text=auto
 
+# Enforce LF on .gitattributes itself too
+.gitattributes text eol=lf
 # Enforce LF line endings on all Linux configuration, shell, and BlueBuild files
 *.sh text eol=lf
 *.yml text eol=lf
@@ -24,3 +26,4 @@ files/system/usr/libexec/* text eol=lf
 files/system/usr/share/kushagra-os/livesys/* text eol=lf
 environment text eol=lf
 kwinrc text eol=lf
+kwinrulesrc text eol=lf

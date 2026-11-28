@@ -789,7 +789,13 @@ Window {
                 GlassButton {
                     visible: root.currentStep === 3 && installerBackend.installError.length > 0 && !installerBackend.installing
                     text: isHindi ? "← वापस ड्राइव चुनें" : "← Return to Target Selection"
-                    onClicked: root.currentStep = 1
+                    onClicked: {
+                        root.confirmChecked = false
+                        if (typeof installerBackend !== "undefined" && installerBackend) {
+                            installerBackend.scanDrives()
+                        }
+                        root.currentStep = 1
+                    }
                 }
 
                 Item { Layout.fillWidth: true }

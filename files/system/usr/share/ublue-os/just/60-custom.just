@@ -230,6 +230,11 @@ install-gaming:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "=== Installing Kushagra OS Windows Gaming Stack ==="
+    if flatpak remotes --system --columns=name,subset 2>/dev/null | grep -E '^flathub[[:space:]]+verified([[:space:]]|$)' >/dev/null; then
+        echo "Notice: System remote 'flathub' currently has subset=verified; unfiltering 'flathub' so community-packaged com.valvesoftware.Steam can install (leaving 'flathub-verified' untouched)..."
+        echo "Tip: Run 'ujust flathub-unfilter' to keep unfiltered Flathub across reboots."
+        sudo flatpak remote-modify --system --subset= flathub || true
+    fi
     echo "Staging Steam, Heroic Games Launcher, MangoHud & Gamescope via Flathub..."
     flatpak install --system -y flathub \
         com.valvesoftware.Steam \

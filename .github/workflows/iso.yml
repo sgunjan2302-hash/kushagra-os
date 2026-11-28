@@ -98,7 +98,7 @@ jobs:
           # 1. Stage official Fedora signed UEFI binaries (shim + grub2-efi)
           mkdir -p /tmp/efi-staging/boot/efi/EFI/fedora /tmp/efi-staging/boot/efi/EFI/BOOT
           echo "Extracting signed UEFI bootloader binaries via Fedora container..."
-          sudo podman run --rm -v /tmp/efi-staging/boot/efi:/out quay.io/fedora/fedora:latest bash -c '
+          sudo podman run --rm -v /tmp/efi-staging/boot/efi:/out quay.io/fedora/fedora:44 bash -c '
             set -euo pipefail
             dnf install -y shim-x64 grub2-efi-x64
             mkdir -p /out/EFI

@@ -558,6 +558,8 @@ try:
             '--skip-finalize',
             'label=type:unconfined_t',
             '--rootfs',
+            '/sys/fs/selinux:/sys/fs/selinux',
+            '/sys/firmware/efi/efivars:/sys/firmware/efi/efivars',
             'bootc',
             'finalize',
             'compress=zstd:1',
@@ -565,6 +567,7 @@ try:
             '_sha256_file',
             'kushagra-oobe-pending',
         ])
+        and '/:O' not in deploy_txt
         and 'bootc_deploy.deploy_system' in backend_txt
         and '--cmdline' not in backend_txt
     )
@@ -574,7 +577,7 @@ try:
         'timeout_style=menu',
         'timeout=4',
         'timeout_style=hidden',
-        'timeout=0',
+        'timeout=1',
         'chainloader',
         'Windows Boot Manager',
         'chmod 0644',

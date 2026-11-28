@@ -14,7 +14,7 @@ mkdir -p /var/log
 
 # Keep failure log bounded while preserving recent incident context
 if [ -f "${LOG_FILE}" ] && [ "$(wc -c < "${LOG_FILE}" 2>/dev/null || echo 0)" -gt 262144 ]; then
-    tail -n 1000 "${LOG_FILE}" > "${LOG_FILE}.tmp" && mv -f "${LOG_FILE}.tmp" "${LOG_FILE}"
+    tail -n 1000 "${LOG_FILE}" >| "${LOG_FILE}.tmp" && mv -f "${LOG_FILE}.tmp" "${LOG_FILE}"
 fi
 
 timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo 'unknown')"
@@ -93,10 +93,11 @@ ${greenboot_logs}
 
 --- Automatic Rollback Explanation ---
 One or more mandatory Kushagra OS health checks in /usr/lib/greenboot/check/required.d/
-failed during startup. Greenboot allows up to GREENBOOT_MAX_BOOT_ATTEMPTS=2 attempts
-for a newly staged deployment. If health checks continue to fail when boot attempts are
-exhausted, Greenboot and GRUB2 will automatically roll back to the previous known-good
-bootc deployment on the next reboot.
+failed during startup. With GREENBOOT_MAX_BOOT_ATTEMPTS=2, Greenboot triggers rollback
+after 1 initial failure + 2 retry boots (3 failed boots total) for a newly staged
+deployment. If health checks continue to fail once those boot attempts are exhausted,
+Greenboot and GRUB2 will automatically roll back to the previous known-good bootc
+deployment on the next reboot.
 To inspect further after recovery:
   sudo bootc status
   sudo cat /var/log/kushagra-greenboot-failure.log
@@ -110,7 +111,7 @@ chmod 0644 "${LOG_FILE}" || true
 cat <<EOF >&2
 [KUSHAGRA-GREENBOOT][RED] Health check failed at ${timestamp} (kernel ${kernel_rel}).
 [KUSHAGRA-GREENBOOT][RED] Failure diagnostics written to ${LOG_FILE}.
-[KUSHAGRA-GREENBOOT][RED] System will retry or automatically roll back to the previous healthy deployment (max attempts: 2).
+[KUSHAGRA-GREENBOOT][RED] System will retry or automatically roll back to the previous healthy deployment (GREENBOOT_MAX_BOOT_ATTEMPTS=2: 1 initial failure + 2 retry boots).
 EOF
 
 exit 0

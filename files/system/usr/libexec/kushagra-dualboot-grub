@@ -161,7 +161,7 @@ if [ "$MODE" = "check" ]; then
     if [ "$DUAL_BOOT_READY" -eq 1 ]; then
         echo "Result       : dual-boot (menu, timeout=4)"
     else
-        echo "Result       : single-os (hidden, timeout=0)"
+        echo "Result       : single-os (hidden, timeout=1)"
     fi
     exit 0
 fi
@@ -184,7 +184,7 @@ EOF
     else
         cat <<'EOF'
 set timeout_style=hidden
-set timeout=0
+set timeout=1
 EOF
     fi
 }
@@ -215,5 +215,5 @@ fi
 if [ "$DUAL_BOOT_READY" -eq 1 ]; then
     echo "[PASS] Wrote dual-boot ${TARGET_CFG} (Windows Boot Manager at ${WIN_EFI_REL}, EFI UUID ${EFI_UUID})."
 else
-    echo "[PASS] Wrote single-OS ${TARGET_CFG} (timeout_style=hidden, timeout=0)."
+    echo "[PASS] Wrote single-OS ${TARGET_CFG} (timeout_style=hidden, timeout=1)."
 fi

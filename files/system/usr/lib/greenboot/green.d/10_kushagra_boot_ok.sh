@@ -61,10 +61,13 @@ fi
 
 recovery_note="normal_green_boot"
 if [ -f "${FAILURE_LOG}" ] && grep -q '^STATUS: PENDING' "${FAILURE_LOG}" 2>/dev/null; then
-    last_failed_id="$(awk -F': ' '/^Failed Deployment Booted: / {val=$2} END {print val}' "${FAILURE_LOG}" 2>/dev/null || true)"
+    last_failed_id="$(awk '/^Failed Deployment Booted: / {sub(/^Failed Deployment Booted: /, ""); val=$0} END {print val}' "${FAILURE_LOG}" 2>/dev/null || true)"
     if [ -n "${last_failed_id}" ] && [ "${last_failed_id}" != "unknown" ] \
         && [ "${bootc_booted_id}" != "unknown" ] && [ "${last_failed_id}" != "${bootc_booted_id}" ]; then
         recovery_note="rolled_back_cleanly (recovered from failed deployment: ${last_failed_id})"
+    elif [ -n "${last_failed_id}" ] && [ "${last_failed_id}" != "unknown" ] \
+        && [ "${bootc_booted_id}" != "unknown" ] && [ "${last_failed_id}" = "${bootc_booted_id}" ]; then
+        recovery_note="recovered_on_retry"
     elif [ "${bootc_rollback_id}" != "none" ] && [ "${bootc_rollback_id}" != "" ]; then
         recovery_note="recovered_with_rollback_deployment_present (${bootc_rollback_id})"
     else
@@ -75,7 +78,7 @@ if [ -f "${FAILURE_LOG}" ] && grep -q '^STATUS: PENDING' "${FAILURE_LOG}" 2>/dev
     awk -v ts="${timestamp}" -v note="${recovery_note}" '
         /^STATUS: PENDING/ { print "STATUS: RESOLVED (" ts " - " note ")"; next }
         { print }
-    ' "${FAILURE_LOG}" > "${FAILURE_LOG}.tmp" && mv -f "${FAILURE_LOG}.tmp" "${FAILURE_LOG}"
+    ' "${FAILURE_LOG}" >| "${FAILURE_LOG}.tmp" && mv -f "${FAILURE_LOG}.tmp" "${FAILURE_LOG}"
     chmod 0644 "${FAILURE_LOG}" || true
 
     cat <<EOF >> "${FAILURE_LOG}"
@@ -88,7 +91,7 @@ fi
 
 # Keep status log bounded to recent boot verifications
 if [ -f "${STATUS_LOG}" ] && [ "$(wc -l < "${STATUS_LOG}" 2>/dev/null || echo 0)" -gt 400 ]; then
-    tail -n 200 "${STATUS_LOG}" > "${STATUS_LOG}.tmp" && mv -f "${STATUS_LOG}.tmp" "${STATUS_LOG}"
+    tail -n 200 "${STATUS_LOG}" >| "${STATUS_LOG}.tmp" && mv -f "${STATUS_LOG}.tmp" "${STATUS_LOG}"
 fi
 
 cat <<EOF >> "${STATUS_LOG}"

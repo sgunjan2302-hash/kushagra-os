@@ -11,7 +11,7 @@ opacityactiverule=2
 opacityinactive=100
 opacityinactiverule=2
 types=1
-wmclass=^org\.gnome\..*
+wmclass=^org\\.gnome\\..*
 wmclasscomplete=false
 wmclassmatch=3
 
@@ -24,7 +24,7 @@ opacityactiverule=2
 opacityinactive=100
 opacityinactiverule=2
 types=1
-wmclass=^(chromium|chromium-browser|org\.chromium\.Chromium|google-chrome|brave-browser|code|code-url-handler|com\.visualstudio\.code|discord|com\.discordapp\.Discord)$
+wmclass=^(chromium|chromium-browser|org\\.chromium\\.Chromium|google-chrome|brave-browser|code|code-url-handler|com\\.visualstudio\\.code|discord|com\\.discordapp\\.Discord)$
 wmclasscomplete=false
 wmclassmatch=3
 
@@ -37,6 +37,6 @@ opacityactiverule=2
 opacityinactive=100
 opacityinactiverule=2
 types=1
-wmclass=^(bazaar|io\.github\.kolunmi\.Bazaar|onlyoffice|DesktopEditors|org\.onlyoffice\.desktopeditors|com\.github\.tchx84\.Flatseal|io\.github\.flattool\.Warehouse|io\.missioncenter\.MissionCenter|com\.usebottles\.bottles)$
+wmclass=^(bazaar|io\\.github\\.kolunmi\\.Bazaar|onlyoffice|DesktopEditors|org\\.onlyoffice\\.desktopeditors|com\\.github\\.tchx84\\.Flatseal|io\\.github\\.flattool\\.Warehouse|io\\.missioncenter\\.MissionCenter|com\\.usebottles\\.bottles)$
 wmclasscomplete=false
 wmclassmatch=3
