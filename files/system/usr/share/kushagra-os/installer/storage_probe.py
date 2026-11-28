@@ -365,6 +365,7 @@ def scan_storage(allow_privileged: bool = True) -> dict:
                         "partPath": "",
                         "partKname": "",
                         "displayName": f"Blank Disk (Unallocated Space) on {path}",
+                        "startBytes": 1048576,
                         "sizeBytes": usable_bytes,
                         "sizeLabel": _human_size(usable_bytes),
                         "fstype": "free",
@@ -387,9 +388,16 @@ def scan_storage(allow_privileged: bool = True) -> dict:
                         "mounts": [],
                     })
             else:
+                is_gpt_disk = (raw_pttype == "gpt")
                 for idx, gap in enumerate(gaps):
                     g_size = gap["sizeBytes"]
-                    can_pick = g_size >= MIN_TARGET_BYTES
+                    can_pick = is_gpt_disk and (g_size >= MIN_TARGET_BYTES)
+                    if not is_gpt_disk:
+                        gap_badge = "Legacy MBR Disk (UEFI GPT Required)"
+                    elif g_size >= MIN_TARGET_BYTES:
+                        gap_badge = "Recommended (Clean Dual-Boot)"
+                    else:
+                        gap_badge = "Free Space (< 20 GB)"
                     segments.append({
                         "id": f"unalloc:{path}:{gap['startBytes']}",
                         "kind": "unallocated",
@@ -398,16 +406,17 @@ def scan_storage(allow_privileged: bool = True) -> dict:
                         "partPath": "",
                         "partKname": "",
                         "displayName": f"Unallocated Free Space #{idx + 1} on {path}",
+                        "startBytes": gap["startBytes"],
                         "sizeBytes": g_size,
                         "sizeLabel": _human_size(g_size),
                         "fstype": "free",
                         "label": "Unallocated Space",
-                        "badgeText": "Recommended (Clean Dual-Boot)" if can_pick else "Free Space (< 20 GB)",
-                        "isLocked": False,
+                        "badgeText": gap_badge,
+                        "isLocked": not is_gpt_disk,
                         "isWindows": False,
                         "isEsp": False,
                         "isLive": False,
-                        "isTooSmall": not can_pick,
+                        "isTooSmall": is_gpt_disk and (g_size < MIN_TARGET_BYTES),
                         "needsInitGpt": False,
                         "selectable": can_pick,
                         "recommended": can_pick,
@@ -582,6 +591,7 @@ def preview_sample_storage() -> dict:
                         "partPath": "",
                         "partKname": "",
                         "displayName": "Unallocated Free Space #1 on /dev/nvme0n1",
+                        "startBytes": 204800000000,
                         "sizeBytes": 107374182400,
                         "sizeLabel": "100.0 GB",
                         "fstype": "free",

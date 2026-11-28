@@ -1,0 +1,14 @@
+[Unit]
+Description=Kushagra OS Verified Flathub Remote Initializer
+ConditionKernelCommandLine=!rd.live.image
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=45
+ExecStart=/usr/libexec/kushagra-flatpak-verified-init
+
+[Install]
+WantedBy=multi-user.target

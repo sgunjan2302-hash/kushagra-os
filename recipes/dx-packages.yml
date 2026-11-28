@@ -1,0 +1,33 @@
+type: dnf
+repos:
+  copr:
+    - ublue-os/packages
+install:
+  skip-unavailable: true
+  packages:
+    # --- Native VS Code RPM (never Flatpak VS Code) ---
+    - code
+
+    # --- Container & Developer Virtualization Stack ---
+    - distrobox
+    - podman
+    - podman-compose
+    - podman-docker
+
+    # --- Optional Docker CE Stack (skipped gracefully if docker-ce.repo unavailable on Fedora 44) ---
+    - docker-ce
+    - docker-ce-cli
+    - containerd.io
+    - docker-buildx-plugin
+    - docker-compose-plugin
+
+    # --- Universal Blue COPR DX Utilities ---
+    - bbrew
+    - krunner-bazaar
+
+    # --- Developer Productivity Essentials ---
+    - git
+    - ripgrep
+    - fd-find
+    - jq
+    - tmux

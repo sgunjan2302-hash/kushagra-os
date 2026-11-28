@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=https://schema.blue-build.org/recipe-v1.json
+---
+name: kushagra-os-dx
+description: Kushagra OS DX (v0.5.0) - Developer Edition built on Kushagra OS Fedora Atomic Kinoite 44 with native VS Code, Podman/Distrobox/Docker opt-in, Homebrew, and Verified Flathub DX tooling.
+base-image: ghcr.io/sgunjan2302-hash/kushagra-os
+image-version: 44
+
+modules:
+  - type: script
+    snippets:
+      - |
+        set -euo pipefail
+        # Stage Microsoft VS Code RPM repository cleanly for native `code` installation
+        mkdir -p /etc/yum.repos.d
+        rpm --import https://packages.microsoft.com/keys/microsoft.asc
+        cat <<'EOF' > /etc/yum.repos.d/vscode.repo
+        [code]
+        name=Visual Studio Code
+        baseurl=https://packages.microsoft.com/yumrepos/vscode
+        enabled=1
+        autorefresh=1
+        type=rpm-md
+        gpgcheck=1
+        gpgkey=https://packages.microsoft.com/keys/microsoft.asc
+        EOF
+        chmod 0644 /etc/yum.repos.d/vscode.repo
+
+        # Optionally stage Fedora Docker CE repository if Fedora 44 metadata is live/reachable
+        ARCH="$(uname -m)"
+        if curl -fsSL --retry 3 --connect-timeout 15 --max-time 20 -o /tmp/docker-ce.repo https://download.docker.com/linux/fedora/docker-ce.repo; then
+          if curl -fsSL --connect-timeout 10 --max-time 15 "https://download.docker.com/linux/fedora/44/${ARCH}/stable/repodata/repomd.xml" >/dev/null 2>&1; then
+            install -m 0644 /tmp/docker-ce.repo /etc/yum.repos.d/docker-ce.repo
+            rpm --import https://download.docker.com/linux/fedora/gpg || true
+          else
+            echo "Notice: Docker CE Fedora 44 repo metadata not reachable yet; skipping docker-ce.repo cleanly."
+          fi
+          rm -f /tmp/docker-ce.repo
+        else
+          echo "Notice: Failed to download docker-ce.repo; optional Docker CE RPMs will be skipped gracefully."
+        fi
+
+  - from-file: dx-packages.yml
+
+  - type: brew
+    brew-analytics: false
+    nofile-limits: true
+
+  - type: script
+    snippets:
+      - |
+        set -euo pipefail
+        chmod 0755 /usr/libexec/kushagra-flatpak-verified-init /usr/libexec/kushagra-fwupd-notify 2>/dev/null || true
+
+        # Apply targeted Kushagra DX user presets without wiping base K-AI / Plasma global settings
+        if [ -f /usr/lib/systemd/user-preset/85-kushagra-dx.preset ]; then
+          systemctl --global preset podman.socket kushagra-fwupd-notify.timer || true
+        fi
+
+        # Verify docker.socket and docker.service remain strictly disabled by default (opt-in via ujust devmode / dx-group)
+        systemctl disable docker.socket docker.service 2>/dev/null || true
+        DOCKER_SOCKET_STATE="$(systemctl is-enabled docker.socket 2>/dev/null || true)"
+        if [ "${DOCKER_SOCKET_STATE}" = "enabled" ]; then
+          echo "ERROR: docker.socket must remain disabled by default (manual opt-in via ujust devmode / dx-group)." >&2
+          exit 1
+        fi
+
+  - type: os-release
+    properties:
+      NAME: "Kushagra OS"
+      ID: "kushagra-os"
+      ID_LIKE: "fedora"
+      PRETTY_NAME: "Kushagra OS 44 DX (v0.5.0)"
+
+  - type: signing

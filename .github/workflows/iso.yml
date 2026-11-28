@@ -70,6 +70,24 @@ jobs:
             sudo podman pull "${IMAGE_PULL_REF}"
           fi
 
+      - name: Stage Seekable OCI Directory (/tmp/kushagra-oci)
+        run: |
+          set -euo pipefail
+          IMAGE_TAG="${{ github.event.inputs.image_tag || '44' }}"
+          IMAGE_REF="ghcr.io/${{ github.repository_owner }}/kushagra-os:${IMAGE_TAG}"
+          sudo rm -rf /tmp/kushagra-oci
+          echo "Copying seekable OCI directory from containers-storage:${IMAGE_REF} -> /tmp/kushagra-oci..."
+          if ! sudo skopeo copy "containers-storage:${IMAGE_REF}" "oci:/tmp/kushagra-oci"; then
+            echo "[WARN] containers-storage copy failed; falling back to docker://${IMAGE_REF}..."
+            sudo rm -rf /tmp/kushagra-oci
+            sudo skopeo copy "docker://${IMAGE_REF}" "oci:/tmp/kushagra-oci"
+          fi
+          test -f /tmp/kushagra-oci/oci-layout
+          test -f /tmp/kushagra-oci/index.json
+          echo "Verified seekable OCI payload at /tmp/kushagra-oci:"
+          ls -lh /tmp/kushagra-oci
+          du -sh /tmp/kushagra-oci
+
       - name: Ensure Titanoboa Contract Compliance
         run: |
           set -euo pipefail
@@ -110,28 +128,65 @@ jobs:
           sudo podman cp /tmp/efi-staging/boot kushagra-iso-patch:/
           sudo podman commit kushagra-iso-patch "${IMAGE_REF}"
           sudo podman rm -f kushagra-iso-patch
+          sudo rm -rf /tmp/efi-staging
 
           # 3. Verify contract compliance inside committed image
           echo "Verifying contract compliance inside ${IMAGE_REF}:"
           sudo podman run --rm "${IMAGE_REF}" ls -la /usr/lib/bootc-image-builder/iso.yaml /boot/efi/EFI/fedora /boot/efi/EFI/BOOT
 
-      - name: Patch Titanoboa GRUB Template for Real Hardware EFI
+      - name: Patch Titanoboa Scripts for EFI, Hidden GRUB & Seekable OCI Payload
         run: |
           set -euo pipefail
-          echo "Patching Titanoboa build_iso.sh for rmmod tpm, silent hidden GRUB, and EFI resilience..."
+          echo "Patching Titanoboa main.sh and build_iso.sh for rmmod tpm, hidden GRUB, EFI resilience, and /run/initramfs/live/kushagra-oci..."
+          TITANOBOA_MAIN="$(find /home/runner/work/_actions/ublue-os/titanoboa -name "main.sh" 2>/dev/null | head -n 1 || true)"
           TITANOBOA_SCRIPT="$(find /home/runner/work/_actions/ublue-os/titanoboa -name "build_iso.sh" 2>/dev/null | head -n 1 || true)"
+          if [ -z "$TITANOBOA_MAIN" ] || [ ! -f "$TITANOBOA_MAIN" ]; then
+            echo "ERROR: Could not locate Titanoboa main.sh under /home/runner/work/_actions/ublue-os/titanoboa" >&2
+            find /home/runner/work/_actions/ -name "*.sh" 2>/dev/null || true
+            exit 1
+          fi
           if [ -z "$TITANOBOA_SCRIPT" ] || [ ! -f "$TITANOBOA_SCRIPT" ]; then
             echo "ERROR: Could not locate Titanoboa build_iso.sh under /home/runner/work/_actions/ublue-os/titanoboa" >&2
             find /home/runner/work/_actions/ -name "*.sh" 2>/dev/null || true
             exit 1
           fi
+          echo "Found Titanoboa main script at: $TITANOBOA_MAIN"
           echo "Found Titanoboa build script at: $TITANOBOA_SCRIPT"
-          python3 - "$TITANOBOA_SCRIPT" <<'PY'
+
+          python3 - "$TITANOBOA_MAIN" "$TITANOBOA_SCRIPT" <<'PY'
           import re
           import sys
 
-          path = sys.argv[1]
-          with open(path, "r", encoding="utf-8") as f:
+          main_path, build_path = sys.argv[1], sys.argv[2]
+
+          # --- Patch main.sh: bind-mount /tmp/kushagra-oci -> /oci-payload:ro into podman run ---
+          with open(main_path, "r", encoding="utf-8") as f:
+              main_text = f.read()
+
+          if "/tmp/kushagra-oci:/oci-payload:ro" not in main_text:
+              main_text, n_podman = re.subn(
+                  r"^([ \t]*(?:sudo[ \t]+)?podman[ \t]+run\b)",
+                  r"\1 -v /tmp/kushagra-oci:/oci-payload:ro",
+                  main_text,
+                  flags=re.MULTILINE,
+              )
+              if n_podman == 0:
+                  main_text, n_podman = re.subn(
+                      r"^([ \t]*(?!#)[^\n#]*?\bpodman[ \t]+run\b)",
+                      r"\1 -v /tmp/kushagra-oci:/oci-payload:ro",
+                      main_text,
+                      flags=re.MULTILINE,
+                  )
+              if n_podman == 0:
+                  print("=== Titanoboa main.sh ===", file=sys.stderr)
+                  print(main_text, file=sys.stderr)
+                  raise SystemExit("ERROR: Could not find 'podman run' in Titanoboa main.sh")
+
+          with open(main_path, "w", encoding="utf-8", newline="\n") as f:
+              f.write(main_text)
+
+          # --- Patch build_iso.sh: GRUB/EFI hardening + copy /oci-payload to /work/iso-root/kushagra-oci ---
+          with open(build_path, "r", encoding="utf-8") as f:
               text = f.read()
 
           # 1. Inject rmmod tpm right before function load_video in the GRUB template
@@ -181,15 +236,34 @@ jobs:
               if n_efi != 1:
                   raise SystemExit("ERROR: Could not find 'cp -avT /rootfs/boot/efi/EFI /work/EFI' in Titanoboa build_iso.sh")
 
-          with open(path, "w", encoding="utf-8", newline="\n") as f:
+          # 4. Stage seekable OCI payload directly into ISO root (/run/initramfs/live/kushagra-oci)
+          #    right before xorriso -as mkisofs so squashfs.img is NOT bloated.
+          if "/work/iso-root/kushagra-oci" not in text:
+              text, n_xor = re.subn(
+                  r"^([ \t]*(?!#)[^\n#]*?\bxorriso[ \t]+-as[ \t]+mkisofs\b)",
+                  "if [ -d /oci-payload ]; then cp -aT /oci-payload /work/iso-root/kushagra-oci; fi\n\\1",
+                  text,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+              if n_xor != 1:
+                  raise SystemExit("ERROR: Could not find 'xorriso -as mkisofs' in Titanoboa build_iso.sh")
+
+          with open(build_path, "w", encoding="utf-8", newline="\n") as f:
               f.write(text)
           PY
+
+          grep -q '/tmp/kushagra-oci:/oci-payload:ro' "$TITANOBOA_MAIN"
           grep -q 'rmmod tpm' "$TITANOBOA_SCRIPT"
           grep -q 'timeout_style=hidden' "$TITANOBOA_SCRIPT"
           grep -q '/work/EFI/BOOT/grubx64.efi' "$TITANOBOA_SCRIPT"
-          echo "Verification of patched Titanoboa build script:"
+          grep -q 'kushagra-oci' "$TITANOBOA_SCRIPT"
+          echo "Verification of patched Titanoboa main.sh:"
+          grep -n -C 3 "/tmp/kushagra-oci:/oci-payload:ro" "$TITANOBOA_MAIN"
+          echo "Verification of patched Titanoboa build_iso.sh:"
           grep -n -C 5 "rmmod tpm" "$TITANOBOA_SCRIPT"
           grep -n -C 5 "timeout_style=hidden" "$TITANOBOA_SCRIPT"
+          grep -n -C 3 "kushagra-oci" "$TITANOBOA_SCRIPT"
 
       - name: Generate LiveCD ISO with Titanoboa
         # Uses Titanoboa composite action to build a bootc bootable LiveCD ISO
@@ -202,15 +276,27 @@ jobs:
 
       - name: Stage Final ISO to Workspace
         run: |
+          set -euo pipefail
           ISO_FILE="${{ steps.titanoboa.outputs.iso-dest }}"
+          DEST_ISO="${{ github.workspace }}/KushagraOS-44.iso"
           echo "Titanoboa generated ISO at: $ISO_FILE"
-          if [ -f "$ISO_FILE" ]; then
-            cp -vf "$ISO_FILE" "${{ github.workspace }}/KushagraOS-44.iso"
+          if [ -n "$ISO_FILE" ] && [ -f "$ISO_FILE" ]; then
+            if [ "$(realpath "$ISO_FILE")" != "$(realpath -m "$DEST_ISO")" ]; then
+              mv -vf "$ISO_FILE" "$DEST_ISO"
+            fi
           else
             echo "Searching for generated ISO file..."
-            find /home/runner/work -name "*KushagraOS*.iso" -exec cp -vf {} "${{ github.workspace }}/KushagraOS-44.iso" \;
+            FOUND_ISO="$(find /home/runner/work -name "*KushagraOS*.iso" -print -quit || true)"
+            if [ -z "$FOUND_ISO" ] || [ ! -f "$FOUND_ISO" ]; then
+              echo "ERROR: Generated KushagraOS ISO not found!" >&2
+              exit 1
+            fi
+            if [ "$(realpath "$FOUND_ISO")" != "$(realpath -m "$DEST_ISO")" ]; then
+              mv -vf "$FOUND_ISO" "$DEST_ISO"
+            fi
           fi
-          ls -lh "${{ github.workspace }}/KushagraOS-44.iso"
+          sudo rm -rf /tmp/kushagra-oci
+          ls -lh "$DEST_ISO"
 
       - name: Generate SHA256 Checksum
         run: |
@@ -231,7 +317,6 @@ jobs:
 
       - name: Upload ISO to Cloudflare R2 ($0 Egress Storage)
         # Cleanly skipped when R2 credentials are not configured in repository secrets
-        if: ${{ env.R2_ACCOUNT_ID != '' && env.R2_BUCKET != '' }}
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
@@ -239,5 +324,10 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
+          set -euo pipefail
+          if [ -z "${R2_ACCOUNT_ID:-}" ] || [ -z "${R2_BUCKET:-}" ] || [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "[SKIP] Cloudflare R2 secrets not configured; skipping ISO upload."
+            exit 0
+          fi
           aws s3 cp KushagraOS-44.iso "s3://${R2_BUCKET}/KushagraOS-44.iso" --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           aws s3 cp KushagraOS-44.iso-CHECKSUM "s3://${R2_BUCKET}/KushagraOS-44.iso-CHECKSUM" --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"

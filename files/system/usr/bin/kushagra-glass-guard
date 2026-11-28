@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Kushagra OS - Liquid Glass Hardware & Low-RAM Guard
-# Disables KWin blur automatically on <= 4.5 GiB RAM or llvmpipe/softpipe renderers
+# Kushagra OS - Liquid Glass Hardware & Emergency Low-RAM Guard
+# Disables KWin blur automatically on < 3.5 GiB RAM or llvmpipe/softpipe/lavapipe renderers
 # when mode is 'auto' (or 'on'), while respecting explicit 'force-on'.
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}"
@@ -17,7 +17,7 @@ if [ ! -x "${TOGGLE_BIN}" ]; then
     TOGGLE_BIN="/usr/bin/kushagra-glass-toggle"
 fi
 
-LOW_RAM_THRESHOLD_KB=4718592 # 4.5 GiB in KiB
+LOW_RAM_THRESHOLD_KB=3670016 # 3.5 GiB in KiB
 
 read_mode_pref() {
     local mode="auto"
@@ -64,7 +64,7 @@ detect_gpu_renderer() {
             return 0
             ;;
     esac
-    if [[ "${MESA_LOADER_DRIVER_OVERRIDE:-}" =~ ^(llvmpipe|softpipe|swrast)$ ]]; then
+    if [[ "${MESA_LOADER_DRIVER_OVERRIDE:-}" =~ ^(llvmpipe|softpipe|lavapipe|swrast)$ ]]; then
         SW_RENDER="true"
         RENDERER="env:${MESA_LOADER_DRIVER_OVERRIDE}"
         return 0
@@ -89,7 +89,7 @@ detect_gpu_renderer() {
         if [ -n "${kwin_info}" ]; then
             kwin_renderer="$(printf '%s\n' "${kwin_info}" | awk '/OpenGL renderer string|GL Renderer/ { sub(/^[^:]+:[[:space:]]*/, ""); gsub(/[[:space:]]+$/, ""); print; exit }' || true)"
             kwin_comp="$(printf '%s\n' "${kwin_info}" | awk '/Compositing Type/ { sub(/^[^:]+:[[:space:]]*/, ""); gsub(/[[:space:]]+$/, ""); print; exit }' || true)"
-            if [[ "${kwin_renderer}" =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt] ]]; then
+            if [[ "${kwin_renderer}" =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ll][Aa][Vv][Aa][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt] ]]; then
                 SW_RENDER="true"
                 RENDERER="${kwin_renderer}"
                 return 0
@@ -111,7 +111,7 @@ detect_gpu_renderer() {
         glx_renderer="$(run_with_timeout glxinfo -B 2>/dev/null | awk -F: '/OpenGL renderer string/ { sub(/^[^:]+:[[:space:]]*/, ""); print; exit }' || true)"
         if [ -n "${glx_renderer}" ]; then
             RENDERER="${glx_renderer}"
-            if [[ "${glx_renderer}" =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt] ]]; then
+            if [[ "${glx_renderer}" =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ll][Aa][Vv][Aa][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt] ]]; then
                 SW_RENDER="true"
             else
                 SW_RENDER="false"
@@ -134,7 +134,7 @@ detect_gpu_renderer() {
             }' || true)"
         if [ -n "${egl_renderer}" ]; then
             RENDERER="${egl_renderer}"
-            if [[ "${egl_renderer}" =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt] ]]; then
+            if [[ "${egl_renderer}" =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ll][Aa][Vv][Aa][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt] ]]; then
                 SW_RENDER="true"
             else
                 SW_RENDER="false"
@@ -150,7 +150,7 @@ detect_gpu_renderer() {
         if printf '%s\n' "${vk_out}" | grep -qE 'PHYSICAL_DEVICE_TYPE_(INTEGRATED|DISCRETE|VIRTUAL)_GPU'; then
             has_hw_vk=1
         fi
-        if printf '%s\n' "${vk_out}" | grep -qiE 'PHYSICAL_DEVICE_TYPE_CPU|llvmpipe'; then
+        if printf '%s\n' "${vk_out}" | grep -qiE 'PHYSICAL_DEVICE_TYPE_CPU|llvmpipe|lavapipe'; then
             has_cpu_vk=1
             cpu_name="$(printf '%s\n' "${vk_out}" | awk -F= '/deviceName/ { gsub(/^[[:space:]]+/, "", $2); print $2; exit }' || true)"
         fi
@@ -220,7 +220,7 @@ detect_gpu_renderer() {
 MODE="$(read_mode_pref)"
 MEM_TOTAL_KB="$(detect_ram_kb)"
 LOW_RAM="false"
-if [ "${MEM_TOTAL_KB}" -gt 0 ] && [ "${MEM_TOTAL_KB}" -le "${LOW_RAM_THRESHOLD_KB}" ]; then
+if [ "${MEM_TOTAL_KB}" -gt 0 ] && [ "${MEM_TOTAL_KB}" -lt "${LOW_RAM_THRESHOLD_KB}" ]; then
     LOW_RAM="true"
 fi
 

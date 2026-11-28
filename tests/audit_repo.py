@@ -489,50 +489,52 @@ try:
 except Exception as e:
     record('Kushagra Setup OOBE Contract', 'FAIL', str(e))
 
-# 15. Stage 1 Custom Qt6/QML K-Installer Contract (v0.2.0 + v0.2.1 bootc/ESP/GPT fixes)
+# 15. Stage 1 Custom Qt6/QML K-Installer Contract (v0.5.0 offline native bootc + dual-boot)
 try:
     required_installer_files = [
         'files/system/usr/bin/kushagra-installer',
         'files/system/usr/libexec/kushagra-installer-autostart',
         'files/system/usr/libexec/kushagra-installer-backend',
+        'files/system/usr/libexec/kushagra-dualboot-grub',
         'files/system/etc/xdg/autostart/kushagra-installer-autostart.desktop',
         'files/system/usr/share/applications/kushagra-installer.desktop',
-        'files/system/etc/anaconda/profile.d/kushagra-os.conf',
         'files/system/etc/polkit-1/rules.d/50-kushagra-installer.rules',
         'files/system/usr/share/polkit-1/actions/org.kushagraos.installer.policy',
         'files/system/usr/share/kushagra-os/installer/main.py',
         'files/system/usr/share/kushagra-os/installer/Main.qml',
         'files/system/usr/share/kushagra-os/installer/storage_probe.py',
-        'files/system/usr/share/kushagra-os/installer/ks_builder.py',
-        'files/system/usr/share/kushagra-os/installer/anaconda_runner.py',
+        'files/system/usr/share/kushagra-os/installer/bootc_deploy.py',
     ]
     missing_inst = [p for p in required_installer_files if not os.path.exists(p)]
 
+    inst_shell_true = []
     for py_path in [
         'files/system/usr/share/kushagra-os/installer/main.py',
         'files/system/usr/share/kushagra-os/installer/storage_probe.py',
-        'files/system/usr/share/kushagra-os/installer/ks_builder.py',
-        'files/system/usr/share/kushagra-os/installer/anaconda_runner.py',
+        'files/system/usr/share/kushagra-os/installer/bootc_deploy.py',
         'files/system/usr/libexec/kushagra-installer-backend',
     ]:
         if os.path.exists(py_path):
-            ast.parse(open(py_path, 'r', encoding='utf-8').read(), filename=py_path)
+            tree = ast.parse(open(py_path, 'r', encoding='utf-8').read(), filename=py_path)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    for kw in node.keywords:
+                        if kw.arg == 'shell' and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                            inst_shell_true.append(py_path)
 
     if os.path.exists('files/system/usr/share/polkit-1/actions/org.kushagraos.installer.policy'):
         ET.parse('files/system/usr/share/polkit-1/actions/org.kushagraos.installer.policy')
 
     autostart_sh = open('files/system/usr/libexec/kushagra-installer-autostart', 'r', encoding='utf-8').read()
-    profile_txt = open('files/system/etc/anaconda/profile.d/kushagra-os.conf', 'r', encoding='utf-8').read()
     probe_txt = open('files/system/usr/share/kushagra-os/installer/storage_probe.py', 'r', encoding='utf-8').read()
-    ks_txt = open('files/system/usr/share/kushagra-os/installer/ks_builder.py', 'r', encoding='utf-8').read()
+    deploy_txt = open('files/system/usr/share/kushagra-os/installer/bootc_deploy.py', 'r', encoding='utf-8').read()
     backend_txt = open('files/system/usr/libexec/kushagra-installer-backend', 'r', encoding='utf-8').read()
-    runner_txt = open('files/system/usr/share/kushagra-os/installer/anaconda_runner.py', 'r', encoding='utf-8').read()
+    db_grub_txt = open('files/system/usr/libexec/kushagra-dualboot-grub', 'r', encoding='utf-8').read()
     inst_main_txt = open('files/system/usr/share/kushagra-os/installer/main.py', 'r', encoding='utf-8').read()
     inst_qml = open('files/system/usr/share/kushagra-os/installer/Main.qml', 'r', encoding='utf-8').read()
     livesys_extra = open('files/system/usr/share/kushagra-os/livesys/livesys-session-extra', 'r', encoding='utf-8').read()
 
     has_live_gate = 'rd.live.image' in autostart_sh and 'liveuser' in autostart_sh
-    has_profile = 'os_id = kushagra-os' in profile_txt and 'base_profile = fedora-kinoite' in profile_txt
     has_safety_locks = (
         'WIN_FSTYPES' in probe_txt
         and 'ESP_PARTTYPES' in probe_txt
@@ -542,59 +544,48 @@ try:
         and 'detect_live_disk_paths' in probe_txt
         and 'os.path.basename' in probe_txt
         and 'needsInitGpt' in probe_txt
+        and '"startBytes"' in probe_txt
     )
-    has_ks_handoff = (
-        'clearpart --none' in ks_txt
-        and 'rootpw --lock' in ks_txt
-        and 'firstboot --disable' in ks_txt
-        and '/var/lib/kushagra-oobe-pending' in ks_txt
-        and 'bootloader --location=none' in ks_txt
-        and '/var/home' in ks_txt
-        and 'grub2-editenv' in ks_txt
-        and 'efibootmgr' in ks_txt
-        and '/boot/efi/EFI/fedora/grub.cfg' in ks_txt
-        and '/boot/efi/EFI/BOOT/grub.cfg' in ks_txt
-        and 'rmmod tpm' in ks_txt
-        and 'load_video' in ks_txt
-        and 'set gfxpayload=keep' in ks_txt
-        and 'if keystatus --shift' not in ks_txt
-        and 'set timeout_style=${GRUB_STYLE}' in ks_txt
-        and 'set timeout=${GRUB_TIMEOUT}' in ks_txt
-        and 'GRUB_STYLE=hidden' in ks_txt
-        and 'GRUB_TIMEOUT=1' in ks_txt
-        and 'GRUB_STYLE=menu' in ks_txt
-        and 'GRUB_TIMEOUT=4' in ks_txt
-        and 'terminal_output console' not in ks_txt
-        and 'vt.global_cursor_default=0' in ks_txt
-        and 'systemd.show_status=false' in ks_txt
-        and 'rd.udev.log_level=3' in ks_txt
-        and 'rw console=tty0 console=ttyS0 systemd.show_status=true' in ks_txt
-        and 'Verbose / Debug Logs' in ks_txt
-        and 'bootmgfw.efi' in ks_txt
-        and 'Windows Boot Manager' in ks_txt
-        and 'chainloader ${WIN_EFI_REL}' in ks_txt
-        and 'in (eng)' in ks_txt
-        and 'graphical.target' in ks_txt
-        and 'setfiles' in ks_txt
-        and 'vmlinuz' in ks_txt
-        and not re.search(r'^\s*user\s+', ks_txt, re.MULTILINE)
+    has_bootc_deploy = (
+        all(tok in deploy_txt for tok in [
+            'OCI_SOURCE_DIR = "/run/initramfs/live/kushagra-oci"',
+            '--source-imgref=oci:',
+            '--enforce-container-sigpolicy',
+            '--skip-fetch-check',
+            '--root-mount-spec=UUID=',
+            '--bootloader=grub',
+            '--stateroot=default',
+            '--skip-finalize',
+            'label=type:unconfined_t',
+            '--rootfs',
+            'bootc',
+            'finalize',
+            'compress=zstd:1',
+            'EFI_BACKUP_DIR',
+            '_sha256_file',
+            'kushagra-oobe-pending',
+        ])
+        and 'bootc_deploy.deploy_system' in backend_txt
+        and '--cmdline' not in backend_txt
     )
-    has_anaconda_cmd = (
-        '--liveinst' not in backend_txt
-        and '--cmdline' in backend_txt
-        and '--kickstart' in backend_txt
-        and 'DBUS_SESSION_BUS_ADDRESS' in backend_txt
-        and 'anaconda_runner.py' in backend_txt
-        and 'security.capability' in backend_txt
-        and 'can_reboot' in runner_txt
-        and 'can_activate_keyboard' in runner_txt
-    )
+    has_dualboot_grub = all(tok in db_grub_txt for tok in [
+        'custom.cfg',
+        'bootmgfw.efi',
+        'timeout_style=menu',
+        'timeout=4',
+        'timeout_style=hidden',
+        'timeout=0',
+        'chainloader',
+        'Windows Boot Manager',
+        'chmod 0644',
+    ])
     has_qml_screens = (
-        all(k in inst_qml for k in ['Install Kushagra OS', 'Try Live Desktop', 'installLogsText', 'espLowSpace'])
+        all(k in inst_qml for k in ['Install Kushagra OS', 'Try Live Desktop', 'installLogsText', 'espLowSpace', 'legacyRamAdvisory'])
         and 'visible: false' in inst_qml
         and 'Qt.FramelessWindowHint' not in inst_qml
         and 'sync_fullscreen' in inst_main_txt
         and '_is_real_screen' in inst_main_txt
+        and 'LEGACY_RAM_THRESHOLD_KIB = 7549747' in inst_main_txt
     )
     has_livesys_kiosk = (
         'kushagra-installer.desktop' in livesys_extra
@@ -606,19 +597,19 @@ try:
         and 'plasma-powerdevil.service' in livesys_extra
     )
 
-    if not missing_inst and has_live_gate and has_profile and has_safety_locks and has_ks_handoff and has_anaconda_cmd and has_qml_screens and has_livesys_kiosk:
+    if not missing_inst and not inst_shell_true and has_live_gate and has_safety_locks and has_bootc_deploy and has_dualboot_grub and has_qml_screens and has_livesys_kiosk:
         record(
             'Kushagra K-Installer Stage 1 Contract',
             'PASS',
-            'LiveCD kiosk gate, storage/Windows/EFI locks, Anaconda cmdline Kickstart backend, bootc GRUB2/EFI staging & OOBE handoff verified',
+            'Offline native bootc deploy_system, Windows EFI SHA256 RAM guard, update-safe GRUB custom.cfg & <8GB advisory verified',
         )
     else:
         record(
             'Kushagra K-Installer Stage 1 Contract',
             'FAIL',
-            f'missing={missing_inst}, has_live_gate={has_live_gate}, has_profile={has_profile}, '
-            f'has_safety_locks={has_safety_locks}, has_ks_handoff={has_ks_handoff}, '
-            f'has_anaconda_cmd={has_anaconda_cmd}, has_qml_screens={has_qml_screens}, has_livesys_kiosk={has_livesys_kiosk}',
+            f'missing={missing_inst}, shell_true={inst_shell_true}, has_live_gate={has_live_gate}, '
+            f'has_safety_locks={has_safety_locks}, has_bootc_deploy={has_bootc_deploy}, '
+            f'has_dualboot_grub={has_dualboot_grub}, has_qml_screens={has_qml_screens}, has_livesys_kiosk={has_livesys_kiosk}',
         )
 except Exception as e:
     record('Kushagra K-Installer Stage 1 Contract', 'FAIL', str(e))
@@ -699,27 +690,29 @@ try:
         'find_existing_bottle' in winrun_py
         and 'flatpak install --system' in just_cfg
     )
-    has_v040_branding = (
-        'v0.4.0' in recipe_raw
+    cfg_issue_raw = open('config/issue.net', 'r', encoding='utf-8').read()
+    has_v050_branding = (
+        'v0.5.0' in recipe_raw
         and 'v0.1 Prototype' not in recipe_raw
-        and 'v0.4.0' in issue_raw
+        and 'v0.5.0' in issue_raw
         and 'v0.1 Prototype' not in issue_raw
+        and 'v0.5.0' in cfg_issue_raw
     )
 
-    if has_live_guards and has_app_fixes and has_v040_branding:
+    if has_live_guards and has_app_fixes and has_v050_branding:
         record(
-            'v0.4.0 LiveCD Guards & Branding Contract',
+            'v0.5.0 LiveCD Guards & Branding Contract',
             'PASS',
-            'LiveCD flatpak/bootloader guards, Bottles/system gaming fixes, and v0.4.0 branding verified',
+            'LiveCD flatpak/bootloader guards, Bottles/system gaming fixes, and v0.5.0 branding verified',
         )
     else:
         record(
-            'v0.4.0 LiveCD Guards & Branding Contract',
+            'v0.5.0 LiveCD Guards & Branding Contract',
             'FAIL',
-            f'has_live_guards={has_live_guards}, has_app_fixes={has_app_fixes}, has_v040_branding={has_v040_branding}',
+            f'has_live_guards={has_live_guards}, has_app_fixes={has_app_fixes}, has_v050_branding={has_v050_branding}',
         )
 except Exception as e:
-    record('v0.3.0 LiveCD Guards & Branding Contract', 'FAIL', str(e))
+    record('v0.5.0 LiveCD Guards & Branding Contract', 'FAIL', str(e))
 
 # 18. Zero-Text Silent OEM Boot, Kushagra Plymouth Theme & Flicker-Free Kiosk Handoff Contract
 try:
@@ -996,8 +989,11 @@ try:
     live_ply_gen = open('files/system/usr/lib/systemd/system-generators/kushagra-live-plymouth-generator', 'r', encoding='utf-8').read()
     just_v4_1 = open('files/system/usr/share/ublue-os/just/60-custom.just', 'r', encoding='utf-8').read()
     has_guard_and_toggle = (
-        '4718592' in glass_guard_sh
+        '3670016' in glass_guard_sh
+        and '4718592' not in glass_guard_sh
+        and '-lt "${LOW_RAM_THRESHOLD_KB}"' in glass_guard_sh
         and 'llvmpipe' in glass_guard_sh
+        and 'lavapipe' in glass_guard_sh
         and 'BlurStrength' in glass_toggle_sh
         and 'ExecStart=/usr/bin/kushagra-glass-guard' in glass_unit_txt
         and 'plasmalogin.service.d' in live_ply_gen
@@ -1010,7 +1006,7 @@ try:
         record(
             'Safe Liquid Glass UI Contract',
             'PASS',
-            'Ephemeral 6.8.3 build + fallback, opaque CSD kwinrulesrc, Dark/Light glass palettes, and <=4.5 GiB/llvmpipe guard verified',
+            'Ephemeral 6.8.3 build, opaque CSD kwinrulesrc, Dark/Light palettes, and <3.5 GiB emergency RAM + sw-GPU guard verified',
         )
     else:
         record(
@@ -1205,5 +1201,194 @@ try:
         )
 except Exception as e:
     record('Creator & Dual-Boot Bridges + NTSYNC Contract', 'FAIL', str(e))
+
+# 24. Greenboot-rs Self-Healing Rollback Contract
+try:
+    pkgs_gb = yaml.safe_load(open('recipes/packages.yml', 'r', encoding='utf-8')).get('install', {}).get('packages', [])
+    rec_gb = yaml.safe_load(open('recipes/recipe.yml', 'r', encoding='utf-8')).get('modules', [])
+    s_idx_gb = next((i for i, m in enumerate(rec_gb) if m.get('type') == 'script'), -1)
+    i_idx_gb = next((i for i, m in enumerate(rec_gb) if m.get('type') == 'initramfs'), -1)
+    s_list_gb = rec_gb[s_idx_gb].get('scripts', []) if s_idx_gb >= 0 else []
+
+    gb_conf = open('files/system/etc/greenboot/greenboot.conf', 'r', encoding='utf-8').read()
+    gb_dropin = open('files/system/usr/lib/systemd/system/greenboot-set-rollback-trigger.service.d/10-kushagra-shutdown.conf', 'r', encoding='utf-8').read()
+    gb_core = open('files/system/usr/lib/greenboot/check/required.d/10_kushagra_core.sh', 'r', encoding='utf-8').read()
+    gb_gfx = open('files/system/usr/lib/greenboot/check/required.d/20_kushagra_graphics.sh', 'r', encoding='utf-8').read()
+    gb_patch = open('files/scripts/06-patch-greenboot.sh', 'r', encoding='utf-8').read()
+
+    net_leak = any(
+        re.search(r'\b(curl|wget|ping|nc|ncat|nslookup)\b', txt)
+        for txt in (gb_core, gb_gfx)
+    )
+    has_gb = (
+        'greenboot' in pkgs_gb
+        and 'greenboot-default-health-checks' not in pkgs_gb
+        and 0 <= s_idx_gb < i_idx_gb
+        and '06-patch-greenboot.sh' in s_list_gb
+        and 'GREENBOOT_MAX_BOOT_ATTEMPTS=2' in gb_conf
+        and 'Conflicts=final.target' in gb_dropin
+        and 'Before=final.target' in gb_dropin
+        and 'rd.live.image' in gb_core
+        and 'rd.live.image' in gb_gfx
+        and 'plasmalogin.service' in gb_gfx
+        and '08_greenboot.cfg' in gb_patch
+        and not net_leak
+        and os.path.exists('files/system/usr/lib/greenboot/check/wanted.d/10_kushagra_desktop_sanity.sh')
+        and os.path.exists('files/system/usr/lib/greenboot/red.d/10_kushagra_failure_log.sh')
+        and os.path.exists('files/system/usr/lib/greenboot/green.d/10_kushagra_boot_ok.sh')
+    )
+    if has_gb:
+        record('Greenboot-rs Self-Healing Rollback Contract', 'PASS', 'Offline desktop-safe greenboot-rs, MAX_BOOT_ATTEMPTS=2, #218 workarounds & zero net checks verified')
+    else:
+        record('Greenboot-rs Self-Healing Rollback Contract', 'FAIL', f'net_leak={net_leak}')
+except Exception as e:
+    record('Greenboot-rs Self-Healing Rollback Contract', 'FAIL', str(e))
+
+# 25. Kushagra-DX (-dx), Verified Flathub Bazaar & LVFS fwupd Contract
+try:
+    dx_rec = yaml.safe_load(open('recipes/recipe-dx.yml', 'r', encoding='utf-8'))
+    dx_pkgs = yaml.safe_load(open('recipes/dx-packages.yml', 'r', encoding='utf-8'))
+    bz_cfg = yaml.safe_load(open('files/system/usr/share/kushagra-os/bazaar/config.yaml', 'r', encoding='utf-8'))
+    bz_blk = yaml.safe_load(open('files/system/usr/share/kushagra-os/bazaar/blocklist.yaml', 'r', encoding='utf-8'))
+
+    dx_raw = open('recipes/recipe-dx.yml', 'r', encoding='utf-8').read()
+    dx_pkg_list = dx_pkgs.get('install', {}).get('packages', [])
+    dx_mods = dx_rec.get('modules', [])
+    has_brew_mod = any(m.get('type') == 'brew' and m.get('brew-analytics') is False for m in dx_mods)
+    preset_dx = open('files/system/usr/lib/systemd/user-preset/85-kushagra-dx.preset', 'r', encoding='utf-8').read()
+    fb_init = open('files/system/usr/libexec/kushagra-flatpak-verified-init', 'r', encoding='utf-8').read()
+    fw_notify = open('files/system/usr/libexec/kushagra-fwupd-notify', 'r', encoding='utf-8').read()
+    tuning_v5 = open('files/scripts/02-system-tuning.sh', 'r', encoding='utf-8').read()
+    just_v5 = open('files/system/usr/share/ublue-os/just/60-custom.just', 'r', encoding='utf-8').read()
+    rec_v5 = yaml.safe_load(open('recipes/recipe.yml', 'r', encoding='utf-8'))
+    sys_en_v5 = next((m for m in rec_v5.get('modules', []) if m.get('type') == 'systemd'), {}).get('system', {}).get('enabled', [])
+
+    blk_items = [b for grp in bz_blk.get('blocklists', []) for b in grp.get('block', [])]
+    has_dx = (
+        dx_rec.get('name') == 'kushagra-os-dx'
+        and 'code' in dx_pkg_list
+        and 'podman' in dx_pkg_list
+        and 'type: rpm-ostree' not in dx_raw
+        and has_brew_mod
+        and 'systemctl disable docker.socket' in dx_raw
+        and 'enable podman.socket' in preset_dx
+        and 'enable kushagra-fwupd-notify.timer' in preset_dx
+        and 'flathub-verified' in fb_init
+        and '--subset=verified' in fb_init
+        and 'com.visualstudio.code' in blk_items
+        and '/run/host/etc/bazaar/blocklist.yaml' in bz_cfg.get('yaml-blocklist-paths', [])
+        and 'org.kde.discover.notifier.desktop' in tuning_v5
+        and 'Hidden=true' in tuning_v5
+        and 'timeout 20 fwupdmgr get-updates --json' in fw_notify
+        and 'BitLocker' in fw_notify
+        and 'kushagra-flatpak-verified-init.service' in sys_en_v5
+        and all(r in just_v5 for r in ['devmode:', 'dx-group:', 'flathub-unfilter:'])
+    )
+    if has_dx:
+        record('Kushagra-DX, Verified Bazaar & LVFS fwupd Contract', 'PASS', 'recipe-dx, native code/brew/podman.socket, flathub-verified Bazaar & DiscoverNotifier->fwupd verified')
+    else:
+        record('Kushagra-DX, Verified Bazaar & LVFS fwupd Contract', 'FAIL', 'DX, Bazaar, or fwupd contract incomplete')
+except Exception as e:
+    record('Kushagra-DX, Verified Bazaar & LVFS fwupd Contract', 'FAIL', str(e))
+
+# 26. Signed NVIDIA & Honest Linux EAC v2 Contract
+try:
+    import tomllib as _tomllib
+
+    nv_rec = yaml.safe_load(open('recipes/recipe-nvidia.yml', 'r', encoding='utf-8'))
+    dx_nv_rec = yaml.safe_load(open('recipes/recipe-dx-nvidia.yml', 'r', encoding='utf-8'))
+    nv_kargs = _tomllib.loads(open('files/system/usr/lib/bootc/kargs.d/10-kushagra-nvidia.toml', 'r', encoding='utf-8').read())
+
+    def _nv_order_ok(rec_obj):
+        mods = rec_obj.get('modules', [])
+        ak_idx = next((i for i, m in enumerate(mods) if m.get('type') == 'akmods'), -1)
+        sig_idx = next((i for i, m in enumerate(mods) if m.get('type') == 'signing'), -1)
+        ini_idx = next((i for i, m in enumerate(mods) if m.get('type') == 'initramfs'), -1)
+        ak_mod = mods[ak_idx] if ak_idx >= 0 else {}
+        return (
+            ak_idx >= 0 and sig_idx > ak_idx and ini_idx > sig_idx
+            and ak_mod.get('nvidia-driver') == 'nvidia-open'
+        )
+
+    mok_sh = open('files/system/usr/bin/kushagra-mok-enroll', 'r', encoding='utf-8').read()
+    eac_stat = open('files/system/usr/bin/kushagra-eac-status', 'r', encoding='utf-8').read()
+    eac_mode = open('files/system/usr/bin/kushagra-eac-mode', 'r', encoding='utf-8').read()
+    tuning_nv = open('files/scripts/02-system-tuning.sh', 'r', encoding='utf-8').read()
+    just_nv = open('files/system/usr/share/ublue-os/just/60-custom.just', 'r', encoding='utf-8').read()
+
+    has_nv_eac = (
+        nv_rec.get('name') == 'kushagra-os-nvidia'
+        and dx_nv_rec.get('name') == 'kushagra-os-dx-nvidia'
+        and _nv_order_ok(nv_rec)
+        and _nv_order_ok(dx_nv_rec)
+        and 'rd.driver.blacklist=nouveau' in nv_kargs.get('kargs', [])
+        and 'nvidia-drm.modeset=1' in nv_kargs.get('kargs', [])
+        and 'rm -f /usr/lib/bootc/kargs.d/10-kushagra-nvidia.toml' in tuning_nv
+        and '12345678' in mok_sh
+        and 'PCR 7' in mok_sh
+        and 'rd.live.image' in mok_sh
+        and 'selinux' in eac_stat and 'bpf' in eac_stat
+        and 'lockdown=integrity' in eac_mode
+        and 'iommu.passthrough=0' in eac_mode
+        and 'kernel.kexec_load_disabled = 1' in eac_mode
+        and 'Riot Vanguard' in eac_stat
+        and all(r in just_nv for r in ['enroll-secure-boot-key', 'eac-status', 'eac-mode'])
+    )
+    if has_nv_eac:
+        record('Signed NVIDIA & Honest Linux EAC v2 Contract', 'PASS', 'Signed nvidia-open recipes, non-NVIDIA karg isolation, MOK PCR 7 helper & EAC v2 tooling verified')
+    else:
+        record('Signed NVIDIA & Honest Linux EAC v2 Contract', 'FAIL', 'NVIDIA or EAC v2 contract check failed')
+except Exception as e:
+    record('Signed NVIDIA & Honest Linux EAC v2 Contract', 'FAIL', str(e))
+
+# 27. Zero-Egress CI Chunking, Titanoboa Seekable OCI & Rule #13/#14 Contract
+try:
+    import tomllib as _tomllib_ci
+
+    build_wf = yaml.safe_load(open('.github/workflows/build.yml', 'r', encoding='utf-8'))
+    iso_wf = yaml.safe_load(open('.github/workflows/iso.yml', 'r', encoding='utf-8'))
+    build_raw = open('.github/workflows/build.yml', 'r', encoding='utf-8').read()
+    iso_raw = open('.github/workflows/iso.yml', 'r', encoding='utf-8').read()
+    r2_conf = _tomllib_ci.loads(open('files/system/etc/containers/registries.conf.d/50-kushagra-mirror.conf', 'r', encoding='utf-8').read())
+    r2_raw = open('files/system/etc/containers/registries.conf.d/50-kushagra-mirror.conf', 'r', encoding='utf-8').read()
+    r2_sync = open('files/scripts/r2-sync-oci.sh', 'r', encoding='utf-8').read()
+    arch_rules = open('.agents/rules/kushagra-architecture.md', 'r', encoding='utf-8').read()
+    hc_raw = open('files/system/usr/bin/kushagra-health-check', 'r', encoding='utf-8').read()
+
+    jobs = build_wf.get('jobs', {})
+    derived_pr_safe = all(
+        "github.event_name != 'pull_request'" in str(jobs.get(j, {}).get('if', ''))
+        for j in ['bluebuild-dx', 'bluebuild-nvidia', 'bluebuild-dx-nvidia']
+    )
+    r2_regs = r2_conf.get('registry', [])
+    no_wildcard_r2 = not any(r.get('location') == '*' for r in r2_regs) and 'location = "*"' not in r2_raw
+    scoped_r2 = any('ghcr.io' in str(r.get('location', '')) for r in r2_regs)
+
+    has_ci_oci = (
+        "chunkah: 'true'" in build_raw
+        and "squash: 'false'" in build_raw
+        and "build_chunked_oci: 'false'" in build_raw
+        and 'rechunk:' not in build_raw
+        and '-gt 96' in build_raw
+        and 'cosign verify --key cosign.pub' in build_raw
+        and derived_pr_safe
+        and '/run/initramfs/live/kushagra-oci' in iso_raw
+        and '/work/iso-root/kushagra-oci' in iso_raw
+        and 'skopeo copy' in iso_raw
+        and 'OCI' in iso_raw
+        and no_wildcard_r2
+        and scoped_r2
+        and 'R2_ACCOUNT_ID' in r2_sync
+        and '[SKIP]' in r2_sync
+        and '8 GB RAM Official 2026 Baseline' in arch_rules
+        and 'Max-Parallel Fan-Out' in arch_rules
+        and 'LOW_RAM_THRESHOLD_KB=3670016' in hc_raw
+    )
+    if has_ci_oci:
+        record('Zero-Egress CI, Titanoboa OCI & Rules #13/#14 Contract', 'PASS', 'chunkah<=96 layers, cosign, seekable OCI dir, scoped R2 mirror & Rules #13/#14 verified')
+    else:
+        record('Zero-Egress CI, Titanoboa OCI & Rules #13/#14 Contract', 'FAIL', f'derived_pr_safe={derived_pr_safe}, no_wildcard_r2={no_wildcard_r2}, scoped_r2={scoped_r2}')
+except Exception as e:
+    record('Zero-Egress CI, Titanoboa OCI & Rules #13/#14 Contract', 'FAIL', str(e))
 
 sys.exit(0 if all(r['status'] == 'PASS' for r in results) else 1)

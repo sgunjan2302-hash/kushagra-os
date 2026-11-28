@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Update-Safe Dual-Boot GRUB2 Custom Config Helper
+# Generates ONLY <grub-dir>/custom.cfg (0644), which bootupd's 41_custom.cfg
+# sources automatically at boot:
+#   if [ -f $prefix/custom.cfg ]; then source $prefix/custom.cfg; fi
+# NEVER modifies <grub-dir>/grub.cfg directly.
+
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
+GRUB_DIR="/boot/grub2"
+EFI_DIR="/boot/efi"
+MODE="apply"
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-dualboot-grub [OPTIONS]
+
+Options:
+  --grub-dir <DIR>   Target GRUB2 directory (default: /boot/grub2)
+  --efi-dir <DIR>    Mounted EFI System Partition directory (default: /boot/efi)
+  --dry-run, -n      Print generated custom.cfg without writing to disk
+  --check            Inspect EFI/bootmgfw.efi status and exit cleanly
+  -h, --help         Show this help message
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --grub-dir)
+            if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+                echo "ERROR: --grub-dir requires a directory path." >&2
+                exit 1
+            fi
+            GRUB_DIR="$2"
+            shift 2
+            ;;
+        --grub-dir=*)
+            GRUB_DIR="${1#--grub-dir=}"
+            if [ -z "$GRUB_DIR" ]; then
+                echo "ERROR: --grub-dir cannot be empty." >&2
+                exit 1
+            fi
+            shift
+            ;;
+        --efi-dir)
+            if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+                echo "ERROR: --efi-dir requires a directory path." >&2
+                exit 1
+            fi
+            EFI_DIR="$2"
+            shift 2
+            ;;
+        --efi-dir=*)
+            EFI_DIR="${1#--efi-dir=}"
+            if [ -z "$EFI_DIR" ]; then
+                echo "ERROR: --efi-dir cannot be empty." >&2
+                exit 1
+            fi
+            shift
+            ;;
+        --dry-run|-n)
+            MODE="dry-run"
+            shift
+            ;;
+        --check)
+            MODE="check"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ "$GRUB_DIR" != "/" ]; then
+    GRUB_DIR="${GRUB_DIR%/}"
+fi
+if [ "$EFI_DIR" != "/" ]; then
+    EFI_DIR="${EFI_DIR%/}"
+fi
+
+resolve_efi_uuid() {
+    local efi_mount="$1"
+    local uuid=""
+    local src=""
+    local fstype=""
+
+    if command -v findmnt >/dev/null 2>&1; then
+        uuid="$(findmnt -n -o UUID -M "$efi_mount" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+        if [ -z "$uuid" ]; then
+            src="$(findmnt -n -o SOURCE -M "$efi_mount" 2>/dev/null | head -n1 | sed 's/\[.*\]//' | tr -d '[:space:]' || true)"
+            if [ -n "$src" ] && [ -b "$src" ] && command -v blkid >/dev/null 2>&1; then
+                uuid="$(blkid -s UUID -o value "$src" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+                if [ -z "$uuid" ]; then
+                    uuid="$(blkid -p -s UUID -o value "$src" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+                fi
+            fi
+        fi
+        if [ -z "$uuid" ]; then
+            fstype="$(findmnt -n -o FSTYPE -T "$efi_mount" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+            case "$fstype" in
+                vfat|fat|msdos)
+                    uuid="$(findmnt -n -o UUID -T "$efi_mount" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+                    if [ -z "$uuid" ]; then
+                        src="$(findmnt -n -o SOURCE -T "$efi_mount" 2>/dev/null | head -n1 | sed 's/\[.*\]//' | tr -d '[:space:]' || true)"
+                        if [ -n "$src" ] && [ -b "$src" ] && command -v blkid >/dev/null 2>&1; then
+                            uuid="$(blkid -s UUID -o value "$src" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+                        fi
+                    fi
+                    ;;
+            esac
+        fi
+    fi
+
+    if [[ "$uuid" =~ ^[A-Za-z0-9-]+$ ]]; then
+        printf '%s\n' "$uuid"
+    fi
+}
+
+WIN_EFI_ABS=""
+WIN_EFI_REL=""
+EFI_UUID=""
+DUAL_BOOT_READY=0
+
+if [ -d "${EFI_DIR}/EFI" ]; then
+    WIN_EFI_ABS="$(find "${EFI_DIR}/EFI" -maxdepth 4 -iname 'bootmgfw.efi' -print -quit 2>/dev/null || true)"
+fi
+
+if [ -n "$WIN_EFI_ABS" ]; then
+    WIN_EFI_REL="${WIN_EFI_ABS#"${EFI_DIR}"}"
+    if [[ "$WIN_EFI_REL" != /* ]]; then
+        WIN_EFI_REL="/${WIN_EFI_REL}"
+    fi
+    EFI_UUID="$(resolve_efi_uuid "$EFI_DIR" || true)"
+    if [ -n "$EFI_UUID" ] && [[ "$WIN_EFI_REL" != *$'\n'* ]] && [[ "$WIN_EFI_REL" != *\"* ]]; then
+        DUAL_BOOT_READY=1
+    fi
+fi
+
+TARGET_CFG="${GRUB_DIR}/custom.cfg"
+
+if [ "$MODE" = "check" ]; then
+    echo "=== Kushagra OS Dual-Boot GRUB2 Check ==="
+    echo "GRUB dir     : ${GRUB_DIR}"
+    echo "EFI dir      : ${EFI_DIR}"
+    echo "Target file  : ${TARGET_CFG}"
+    if [ -n "$WIN_EFI_ABS" ]; then
+        echo "bootmgfw.efi : ${WIN_EFI_ABS} (rel: ${WIN_EFI_REL})"
+    else
+        echo "bootmgfw.efi : absent"
+    fi
+    echo "EFI FS UUID  : ${EFI_UUID:-unavailable}"
+    if [ "$DUAL_BOOT_READY" -eq 1 ]; then
+        echo "Result       : dual-boot (menu, timeout=4)"
+    else
+        echo "Result       : single-os (hidden, timeout=0)"
+    fi
+    exit 0
+fi
+
+render_custom_cfg() {
+    cat <<'EOF'
+# Managed by kushagra-dualboot-grub (update-safe via bootupd 41_custom.cfg)
+# Do not edit grub.cfg directly; bootupd preserves and sources $prefix/custom.cfg.
+EOF
+    if [ "$DUAL_BOOT_READY" -eq 1 ]; then
+        cat <<EOF
+set timeout_style=menu
+set timeout=4
+
+menuentry "Windows Boot Manager" --class windows --class os {
+    search --no-floppy --fs-uuid --set=root ${EFI_UUID}
+    chainloader ${WIN_EFI_REL}
+}
+EOF
+    else
+        cat <<'EOF'
+set timeout_style=hidden
+set timeout=0
+EOF
+    fi
+}
+
+if [ "$MODE" = "dry-run" ]; then
+    echo "# [DRY-RUN] Target: ${TARGET_CFG} (0644)"
+    render_custom_cfg
+    exit 0
+fi
+
+if [ -n "$WIN_EFI_ABS" ] && [ "$DUAL_BOOT_READY" -ne 1 ]; then
+    echo "WARN: Found ${WIN_EFI_ABS}, but could not resolve FAT32 EFI filesystem UUID at ${EFI_DIR}; writing single-OS custom.cfg." >&2
+fi
+
+mkdir -p "$GRUB_DIR"
+TMP_CFG="$(mktemp "${GRUB_DIR}/.custom.cfg.tmp.XXXXXX")"
+trap 'rm -f "$TMP_CFG" 2>/dev/null || true' EXIT
+
+render_custom_cfg > "$TMP_CFG"
+chmod 0644 "$TMP_CFG"
+mv -f "$TMP_CFG" "$TARGET_CFG"
+chmod 0644 "$TARGET_CFG"
+
+if command -v restorecon >/dev/null 2>&1; then
+    restorecon "$TARGET_CFG" 2>/dev/null || true
+fi
+
+if [ "$DUAL_BOOT_READY" -eq 1 ]; then
+    echo "[PASS] Wrote dual-boot ${TARGET_CFG} (Windows Boot Manager at ${WIN_EFI_REL}, EFI UUID ${EFI_UUID})."
+else
+    echo "[PASS] Wrote single-OS ${TARGET_CFG} (timeout_style=hidden, timeout=0)."
+fi

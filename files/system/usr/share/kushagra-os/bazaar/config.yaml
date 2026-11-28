@@ -1,0 +1,20 @@
+# Kushagra OS Bazaar Main Configuration
+#
+# Upstream Universal Blue Bazaar Meson build options:
+#   -Dhardcoded_main_config_path=/usr/share/ublue-os/bazaar/main.yaml
+# Inside the Flatpak sandbox (io.github.kolunmi.Bazaar), host /etc is exposed
+# under /run/host/etc/bazaar/... when host-etc permissions are available, while
+# /usr/share/kushagra-os/bazaar/ stores immutable OS defaults.
+# Coordinator links/mounts /etc/bazaar/ and /usr/share/ublue-os/bazaar/ to
+# these configuration files in 02-system-tuning.sh.
+#
+# Verified Flathub Curation:
+# The `flathub-verified` system remote (--subset=verified) is provisioned at boot
+# by kushagra-flatpak-verified-init.service while keeping unfiltered `flathub`
+# intact so `ujust flathub-unfilter` can re-expose unfiltered apps cleanly.
+
+yaml-blocklist-paths:
+  - /run/host/etc/bazaar/blocklist.yaml
+  - /usr/share/kushagra-os/bazaar/blocklist.yaml
+
+start-on-curated: false

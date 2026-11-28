@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,22 @@ from PyQt6.QtQml import QQmlApplicationEngine
 
 sys.path.insert(0, "/usr/share/kushagra-os/installer")
 import storage_probe
+
+LEGACY_RAM_THRESHOLD_KIB = 7549747  # ~7.2 GiB (under 8 GB RAM baseline)
+
+
+def _detect_ram_info(meminfo_path: str = "/proc/meminfo") -> tuple[float, bool]:
+    """Read /proc/meminfo MemTotal and return (ram_gib, legacy_ram_advisory)."""
+    try:
+        text = Path(meminfo_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0.0, False
+    match = re.search(r"^MemTotal:\s+(\d+)\s+kB", text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return 0.0, False
+    mem_kib = int(match.group(1))
+    ram_gib = round((mem_kib * 1024.0) / (1024 ** 3), 2)
+    return ram_gib, (mem_kib < LEGACY_RAM_THRESHOLD_KIB)
 
 
 class ScanWorker(QThread):
@@ -69,10 +86,10 @@ class InstallWorker(QThread):
     def run(self):
         if self.preview_mode:
             steps = [
-                (15, "Preview: Initializing storage & checking EFI partition...", ["Dry-run: clearpart --none validated."]),
-                (35, "Preview: Creating Btrfs subvolumes (root, var, home)...", ["Dry-run: subvol setup ready."]),
-                (70, "Preview: Deploying Kushagra OS immutable image...", ["Dry-run: LiveOS copy simulation..."]),
-                (90, "Preview: Updating UEFI GRUB2 & arming Stage 2 OOBE...", ["Dry-run: /var/lib/kushagra-oobe-pending staged."]),
+                (12, "Preview: Verifying offline OCI payload & EFI partition...", ["Dry-run: /run/initramfs/live/kushagra-oci validated."]),
+                (25, "Preview: Creating Btrfs sysroot & var/home subvolume...", ["Dry-run: subvolid=5,compress=zstd:1 & var/home ready."]),
+                (68, "Preview: Deploying offline Kushagra OS bootc image...", ["Dry-run: bootc install to-filesystem simulation..."]),
+                (90, "Preview: Writing update-safe GRUB2 custom.cfg & arming Stage 2 OOBE...", ["Dry-run: kushagra-dualboot-grub custom.cfg & /var/lib/kushagra-oobe-pending staged."]),
                 (100, "Preview complete (no disk writes performed).", ["Preview mode succeeded cleanly."]),
             ]
             for pct, stage, logs in steps:
@@ -248,6 +265,8 @@ class InstallerBackend(QObject):
     installErrorChanged = pyqtSignal()
     installSucceededChanged = pyqtSignal()
     launchingDesktopChanged = pyqtSignal()
+    ramGibChanged = pyqtSignal()
+    legacyRamAdvisoryChanged = pyqtSignal()
 
     def __init__(self, preview_mode: bool = False, parent=None):
         super().__init__(parent)
@@ -263,6 +282,7 @@ class InstallerBackend(QObject):
         self._install_error = ""
         self._install_succeeded = False
         self._launching_desktop = False
+        self._ram_gib, self._legacy_ram_advisory = _detect_ram_info()
         self._restore_worker = None
         self._workers = []
 
@@ -309,6 +329,14 @@ class InstallerBackend(QObject):
     @pyqtProperty(bool, notify=launchingDesktopChanged)
     def launchingDesktop(self):
         return self._launching_desktop
+
+    @pyqtProperty(float, notify=ramGibChanged)
+    def ramGib(self):
+        return self._ram_gib
+
+    @pyqtProperty(bool, notify=legacyRamAdvisoryChanged)
+    def legacyRamAdvisory(self):
+        return self._legacy_ram_advisory
 
     @pyqtSlot()
     def scanDrives(self):

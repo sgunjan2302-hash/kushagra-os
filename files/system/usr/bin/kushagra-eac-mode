@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Opt-In Linux EAC v2 Kernel Hardening Mode Toggle
+# Manages:
+#   - /etc/sysctl.d/99-kushagra-eac.conf (kernel.kexec_load_disabled = 1)
+#   - rpm-ostree kargs (lockdown=integrity, iommu.passthrough=0)
+# Never disables or weakens SELinux; verifies selinux + bpf remain active.
+
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
+SYSCTL_EAC_CONF="/etc/sysctl.d/99-kushagra-eac.conf"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATUS_BIN="${SCRIPT_DIR}/kushagra-eac-status"
+if [ ! -x "$STATUS_BIN" ] && [ -x /usr/bin/kushagra-eac-status ]; then
+    STATUS_BIN="/usr/bin/kushagra-eac-status"
+fi
+
+ACTION=""
+DRY_RUN=0
+JSON_OUTPUT=0
+TEMP_FILES=()
+
+cleanup() {
+    if [ "${#TEMP_FILES[@]}" -gt 0 ]; then
+        rm -f "${TEMP_FILES[@]}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-eac-mode [status|enable|on|disable|off] [OPTIONS]
+
+Commands:
+  status        Show current EAC v2 security posture (default).
+  enable, on    Enable kexec_load_disabled=1, lockdown=integrity, and iommu.passthrough=0.
+  disable, off  Remove EAC sysctl & kernel arguments cleanly (resets on reboot).
+
+Options:
+  --dry-run, -n Preview exact file and kargs changes without modifying the system.
+  --json        Pass through JSON output when running 'status'.
+  -h, --help    Show this help message.
+EOF
+}
+
+is_live_session() {
+    grep -qw "rd.live.image" /proc/cmdline 2>/dev/null
+}
+
+require_not_live() {
+    if is_live_session; then
+        echo "[BLOCKED] EAC hardening changes are disabled in LiveCD sessions (rd.live.image)." >&2
+        echo "Install Kushagra OS to disk first, then run 'kushagra-eac-mode enable'." >&2
+        exit 1
+    fi
+}
+
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    elif command -v pkexec >/dev/null 2>&1; then
+        pkexec "$@"
+    else
+        echo "[FAIL] Root privileges (sudo or pkexec) are required." >&2
+        exit 1
+    fi
+}
+
+is_ostree_booted() {
+    if [ -e /run/ostree-booted ]; then
+        return 0
+    fi
+    if command -v bootc >/dev/null 2>&1 && bootc status >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+verify_selinux_and_bpf_lsms() {
+    if [ ! -r /sys/kernel/security/lsm ]; then
+        echo "[WARN] /sys/kernel/security/lsm is unreadable; skipping live LSM verification."
+        return 0
+    fi
+
+    local lsm_list=""
+    lsm_list="$(tr -d '[:space:]' < /sys/kernel/security/lsm 2>/dev/null || true)"
+
+    if [[ ",${lsm_list}," != *",selinux,"* ]]; then
+        echo "[FAIL] SELinux is NOT active in /sys/kernel/security/lsm (${lsm_list})." >&2
+        echo "Kushagra OS strictly requires SELinux to remain active and will never strip SELinux." >&2
+        exit 1
+    fi
+
+    if [[ ",${lsm_list}," == *",bpf,"* ]]; then
+        echo "[PASS] Active LSMs verified: selinux and bpf remain enabled (${lsm_list})."
+    else
+        echo "[WARN] SELinux is active, but 'bpf' LSM is missing from /sys/kernel/security/lsm (${lsm_list})."
+    fi
+
+    if grep -Eq '(^|[[:space:]])(selinux=0|enforcing=0)([[:space:]]|$)' /proc/cmdline 2>/dev/null; then
+        echo "[WARN] Kernel cmdline includes enforcing=0 or selinux=0; verify enforcing SELinux for full integrity."
+    fi
+}
+
+find_mok_key() {
+    local candidate=""
+    for candidate in \
+        /etc/pki/akmods/certs/akmods-ublue.der \
+        /etc/pki/akmods/certs/public_key.der; do
+        if [ -f "$candidate" ] && [ -r "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    shopt -s nullglob
+    for candidate in /etc/pki/akmods/certs/*.der /usr/share/ublue-os/*.der; do
+        if [ -f "$candidate" ] && [ -r "$candidate" ]; then
+            shopt -u nullglob
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
+}
+
+check_secure_boot_mok_reminder() {
+    local sb_enabled=0
+    if [ -d /sys/firmware/efi ] && command -v mokutil >/dev/null 2>&1; then
+        local sb_out=""
+        sb_out="$(mokutil --sb-state 2>&1 || true)"
+        if printf '%s\n' "$sb_out" | grep -qi 'SecureBoot enabled'; then
+            sb_enabled=1
+        fi
+    elif command -v bootctl >/dev/null 2>&1; then
+        if bootctl --no-pager status 2>/dev/null | grep -Eiq 'Secure Boot:[[:space:]]*enabled'; then
+            sb_enabled=1
+        fi
+    fi
+
+    if [ "$sb_enabled" -eq 1 ]; then
+        local mok_key=""
+        if mok_key="$(find_mok_key)" && command -v mokutil >/dev/null 2>&1; then
+            local test_out=""
+            test_out="$(mokutil --test-key "$mok_key" 2>&1 || true)"
+            if printf '%s\n' "$test_out" | grep -qiE 'is already enrolled|is already in db'; then
+                echo "[PASS] Secure Boot is enabled and MOK key (${mok_key}) is enrolled."
+                return 0
+            fi
+        fi
+        echo ""
+        echo "[REMINDER] Secure Boot is ENABLED!"
+        echo "  With lockdown=integrity active, unsigned/untrusted kernel modules (such as"
+        echo "  NVIDIA akmods) will be blocked unless your MOK certificate is enrolled."
+        echo "  Run: ujust enroll-secure-boot-key   (or: kushagra-mok-enroll)"
+    fi
+}
+
+cmd_status() {
+    if [ -x "$STATUS_BIN" ]; then
+        if [ "$JSON_OUTPUT" -eq 1 ]; then
+            exec "$STATUS_BIN" --json
+        else
+            exec "$STATUS_BIN"
+        fi
+    elif command -v bash >/dev/null 2>&1 && [ -r "$STATUS_BIN" ]; then
+        if [ "$JSON_OUTPUT" -eq 1 ]; then
+            exec bash "$STATUS_BIN" --json
+        else
+            exec bash "$STATUS_BIN"
+        fi
+    else
+        echo "[FAIL] kushagra-eac-status binary not found." >&2
+        exit 1
+    fi
+}
+
+cmd_enable() {
+    require_not_live
+    echo "=== Kushagra OS Linux EAC v2 Posture: ENABLE ==="
+    verify_selinux_and_bpf_lsms
+
+    local ostree_ready=0
+    if is_ostree_booted && command -v rpm-ostree >/dev/null 2>&1; then
+        ostree_ready=1
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[DRY-RUN] Write ${SYSCTL_EAC_CONF}:"
+        echo "          kernel.kexec_load_disabled = 1"
+        echo "[DRY-RUN] sysctl -p ${SYSCTL_EAC_CONF}"
+        echo "[DRY-RUN] rpm-ostree kargs --append-if-missing=lockdown=integrity --append-if-missing=iommu.passthrough=0"
+        if [ "$ostree_ready" -eq 0 ]; then
+            echo "[INFO] Note: active ostree/bootc deployment or rpm-ostree not detected in current environment."
+        fi
+        check_secure_boot_mok_reminder
+        echo "[DRY-RUN] No system files or kernel arguments were modified."
+        return 0
+    fi
+
+    if [ "$ostree_ready" -eq 0 ]; then
+        echo "[BLOCKED] Active ostree/bootc deployment (/run/ostree-booted) or 'rpm-ostree' not available." >&2
+        echo "Persistent kernel arguments (lockdown=integrity, iommu.passthrough=0) require booted ostree/bootc." >&2
+        exit 1
+    fi
+
+    local tmp_sysctl=""
+    tmp_sysctl="$(mktemp)"
+    TEMP_FILES+=("$tmp_sysctl")
+    cat <<'EOF' > "$tmp_sysctl"
+# Kushagra OS - Linux Anti-Cheat (EAC v2) Kernel Hardening
+# Note: kernel.kexec_load_disabled is a one-way latch until next reboot.
+kernel.kexec_load_disabled = 1
+EOF
+
+    run_root install -d -m 0755 /etc/sysctl.d
+    run_root install -m 0644 "$tmp_sysctl" "$SYSCTL_EAC_CONF"
+    if command -v restorecon >/dev/null 2>&1; then
+        run_root restorecon "$SYSCTL_EAC_CONF" 2>/dev/null || true
+    fi
+
+    local cur_kexec=""
+    cur_kexec="$(cat /proc/sys/kernel/kexec_load_disabled 2>/dev/null || true)"
+    if [ "$cur_kexec" = "1" ]; then
+        run_root sysctl -p "$SYSCTL_EAC_CONF" >/dev/null 2>&1 || true
+        echo "[PASS] ${SYSCTL_EAC_CONF} installed; kernel.kexec_load_disabled is active (1)."
+    else
+        run_root sysctl -p "$SYSCTL_EAC_CONF"
+        echo "[PASS] ${SYSCTL_EAC_CONF} installed and applied via sysctl -p."
+    fi
+
+    run_root rpm-ostree kargs \
+        --append-if-missing=lockdown=integrity \
+        --append-if-missing=iommu.passthrough=0
+
+    verify_selinux_and_bpf_lsms
+    check_secure_boot_mok_reminder
+
+    echo ""
+    echo "================================================================================"
+    echo "[PASS] EAC v2 hardening staged successfully."
+    echo "  - Reboot REQUIRED ('systemctl reboot') for lockdown=integrity and"
+    echo "    iommu.passthrough=0 kernel arguments to become active."
+    echo "  - Note: Windows ring-0 anti-cheat (Valorant Vanguard, CoD Ricochet) remain"
+    echo "    unsupported on Linux; use 'ujust reboot-windows' for those titles."
+    echo "================================================================================"
+}
+
+cmd_disable() {
+    require_not_live
+    echo "=== Kushagra OS Linux EAC v2 Posture: DISABLE ==="
+
+    local ostree_ready=0
+    if is_ostree_booted && command -v rpm-ostree >/dev/null 2>&1; then
+        ostree_ready=1
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[DRY-RUN] Remove ${SYSCTL_EAC_CONF} (if present)"
+        echo "[DRY-RUN] rpm-ostree kargs --delete-if-present=lockdown=integrity --delete-if-present=iommu.passthrough=0"
+        if [ "$ostree_ready" -eq 0 ]; then
+            echo "[INFO] Note: active ostree/bootc deployment or rpm-ostree not detected in current environment."
+        fi
+        echo "[DRY-RUN] Note: kernel.kexec_load_disabled=1 cannot be unset live and resets on reboot."
+        echo "[DRY-RUN] No system files or kernel arguments were modified."
+        return 0
+    fi
+
+    if [ -f "$SYSCTL_EAC_CONF" ]; then
+        run_root rm -f "$SYSCTL_EAC_CONF"
+        echo "[PASS] Removed ${SYSCTL_EAC_CONF}."
+    else
+        echo "[INFO] ${SYSCTL_EAC_CONF} not present (already removed)."
+    fi
+
+    if [ "$ostree_ready" -eq 1 ]; then
+        run_root rpm-ostree kargs \
+            --delete-if-present=lockdown=integrity \
+            --delete-if-present=iommu.passthrough=0
+        echo "[PASS] Removed lockdown=integrity and iommu.passthrough=0 from ostree kargs (if present)."
+    else
+        echo "[WARN] Active ostree/bootc deployment or 'rpm-ostree' not available; skipped kargs removal." >&2
+        exit 1
+    fi
+
+    echo ""
+    echo "================================================================================"
+    echo "[PASS] EAC v2 hardening disabled."
+    echo "  - Note: kernel.kexec_load_disabled=1 is a one-way kernel latch for the current"
+    echo "    boot and resets automatically to 0 on your next reboot."
+    echo "  - Reboot ('systemctl reboot') to clear lockdown=integrity and iommu.passthrough=0."
+    echo "================================================================================"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        status|enable|on|disable|off)
+            if [ -n "$ACTION" ]; then
+                echo "[FAIL] Multiple commands specified ('${ACTION}' and '$1')." >&2
+                usage >&2
+                exit 1
+            fi
+            ACTION="$1"
+            shift
+            ;;
+        --dry-run|-n)
+            DRY_RUN=1
+            shift
+            ;;
+        --json)
+            JSON_OUTPUT=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "[FAIL] Unknown option or command: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$ACTION" ]; then
+    ACTION="status"
+fi
+
+case "$ACTION" in
+    status)
+        cmd_status
+        ;;
+    enable|on)
+        cmd_enable
+        ;;
+    disable|off)
+        cmd_disable
+        ;;
+esac

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS Verified Flathub Remote Initializer
+# Configures `flathub-verified` (--subset=verified) on boot without removing
+# unfiltered `flathub` (so `ujust flathub-unfilter` remains reversible) and
+# skips gracefully when offline or inside a LiveCD session.
+
+REMOTE_NAME="flathub-verified"
+REMOTE_URL="https://dl.flathub.org/repo/flathub.flatpakrepo"
+
+if [ "${1:-}" = "--status" ] || [ "${1:-}" = "--check" ]; then
+    if ! command -v flatpak >/dev/null 2>&1; then
+        echo "[WARN] flatpak is not installed."
+        exit 0
+    fi
+    if flatpak remotes --system --columns=name 2>/dev/null | grep -qx "${REMOTE_NAME}"; then
+        echo "[PASS] ${REMOTE_NAME} system remote is configured."
+    else
+        echo "[WARN] ${REMOTE_NAME} system remote is not configured yet (requires online run)."
+    fi
+    exit 0
+fi
+
+# Never alter Flatpak remotes during LiveCD USB boots
+if [ -r /proc/cmdline ] && grep -qw "rd.live.image" /proc/cmdline; then
+    echo "LiveCD session detected; skipping ${REMOTE_NAME} initialization."
+    exit 0
+fi
+
+if ! command -v flatpak >/dev/null 2>&1; then
+    echo "flatpak not found; skipping ${REMOTE_NAME} initialization."
+    exit 0
+fi
+
+# Allow Bazaar Flatpak sandbox to read host /etc/bazaar/blocklist.yaml & config.yaml read-only
+flatpak override --system --filesystem=host-etc:ro io.github.kolunmi.Bazaar 2>/dev/null || true
+
+# Respect persistent user opt-out created by `ujust flathub-unfilter`
+UNFILTER_MARKER="/var/lib/kushagra-flathub-unfiltered"
+if [ ! -f "${UNFILTER_MARKER}" ]; then
+    if flatpak remotes --system --columns=name 2>/dev/null | grep -qx "flathub"; then
+        flatpak remote-modify --system --subset=verified flathub 2>/dev/null || true
+    fi
+fi
+
+# Fast path: skip network probe if already configured
+if flatpak remotes --system --columns=name 2>/dev/null | grep -qx "${REMOTE_NAME}"; then
+    echo "${REMOTE_NAME} remote already configured."
+    exit 0
+fi
+
+# Non-blocking connectivity check so offline boots never hang or fail
+if command -v curl >/dev/null 2>&1; then
+    if ! curl -fsSL --connect-timeout 6 --max-time 15 "${REMOTE_URL}" >/dev/null 2>&1; then
+        echo "Notice: Offline or Flathub unreachable; deferring ${REMOTE_NAME} setup to next boot."
+        exit 0
+    fi
+fi
+
+# Add verified Flathub subset while keeping existing unfiltered `flathub` intact
+if timeout 30 flatpak remote-add --if-not-exists --system --subset=verified "${REMOTE_NAME}" "${REMOTE_URL}"; then
+    flatpak remote-modify --system --title="Flathub Verified" "${REMOTE_NAME}" 2>/dev/null || true
+    echo "Configured ${REMOTE_NAME} system remote cleanly."
+else
+    echo "Notice: Unable to register ${REMOTE_NAME} now; skipping cleanly without failing boot." >&2
+fi
+
+exit 0

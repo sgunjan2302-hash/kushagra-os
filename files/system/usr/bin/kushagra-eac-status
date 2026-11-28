@@ -1,0 +1,556 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Read-Only Linux EAC v2 Security Posture Diagnostic
+# Inspects Secure Boot, MOK enrollment, TPM 2.0, kernel lockdown, IOMMU,
+# kernel.kexec_load_disabled, active LSMs (selinux + bpf), and honest anti-cheat scope.
+
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
+JSON_OUTPUT=0
+SYSCTL_EAC_CONF="/etc/sysctl.d/99-kushagra-eac.conf"
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-eac-status [OPTIONS]
+
+Options:
+  --json       Emit machine-readable JSON posture telemetry.
+  -h, --help   Show this help message.
+
+Read-only inspection of Secure Boot, MOK status, TPM 2.0, kernel lockdown,
+IOMMU DMA remapping, kexec lock, active LSMs (selinux + bpf), and Linux
+anti-cheat compatibility boundaries. Always exits 0 in read-only mode.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --json)
+            JSON_OUTPUT=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "[FAIL] Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+find_mok_key() {
+    local candidate=""
+    for candidate in \
+        /etc/pki/akmods/certs/akmods-ublue.der \
+        /etc/pki/akmods/certs/public_key.der; do
+        if [ -f "$candidate" ] && [ -r "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    shopt -s nullglob
+    for candidate in /etc/pki/akmods/certs/*.der /usr/share/ublue-os/*.der; do
+        if [ -f "$candidate" ] && [ -r "$candidate" ]; then
+            shopt -u nullglob
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
+}
+
+CMDLINE=""
+if [ -r /proc/cmdline ]; then
+    CMDLINE="$(cat /proc/cmdline 2>/dev/null || true)"
+fi
+
+LIVE_SESSION="false"
+if printf '%s\n' "$CMDLINE" | grep -qw "rd.live.image"; then
+    LIVE_SESSION="true"
+fi
+
+UEFI_MODE="false"
+if [ -d /sys/firmware/efi ]; then
+    UEFI_MODE="true"
+fi
+
+# 1. Secure Boot inspection (mokutil --sb-state -> bootctl -> efivars)
+SB_STATE="unknown"
+SB_ENABLED="false"
+SB_SOURCE="unavailable"
+
+if [ "$UEFI_MODE" = "false" ]; then
+    SB_STATE="unsupported"
+    SB_ENABLED="false"
+    SB_SOURCE="legacy-bios"
+else
+    if command -v mokutil >/dev/null 2>&1; then
+        mok_sb_out="$(mokutil --sb-state 2>&1 || true)"
+        if printf '%s\n' "$mok_sb_out" | grep -qi 'SecureBoot enabled'; then
+            SB_STATE="enabled"
+            SB_ENABLED="true"
+            SB_SOURCE="mokutil"
+        elif printf '%s\n' "$mok_sb_out" | grep -qi 'SecureBoot disabled'; then
+            SB_STATE="disabled"
+            SB_ENABLED="false"
+            SB_SOURCE="mokutil"
+        fi
+    fi
+
+    if [ "$SB_STATE" = "unknown" ] && command -v bootctl >/dev/null 2>&1; then
+        bootctl_out="$(bootctl --no-pager status 2>/dev/null || true)"
+        if printf '%s\n' "$bootctl_out" | grep -Eiq 'Secure Boot:[[:space:]]*enabled'; then
+            SB_STATE="enabled"
+            SB_ENABLED="true"
+            SB_SOURCE="bootctl"
+        elif printf '%s\n' "$bootctl_out" | grep -Eiq 'Secure Boot:[[:space:]]*disabled'; then
+            SB_STATE="disabled"
+            SB_ENABLED="false"
+            SB_SOURCE="bootctl"
+        fi
+    fi
+
+    if [ "$SB_STATE" = "unknown" ]; then
+        shopt -s nullglob
+        for sb_var in /sys/firmware/efi/efivars/SecureBoot-*; do
+            if [ -r "$sb_var" ] && command -v od >/dev/null 2>&1; then
+                sb_byte="$(od -An -t u1 -j 4 -N 1 "$sb_var" 2>/dev/null | xargs || true)"
+                if [ "$sb_byte" = "1" ]; then
+                    SB_STATE="enabled"
+                    SB_ENABLED="true"
+                    SB_SOURCE="efivars"
+                elif [ "$sb_byte" = "0" ]; then
+                    SB_STATE="disabled"
+                    SB_ENABLED="false"
+                    SB_SOURCE="efivars"
+                fi
+                break
+            fi
+        done
+        shopt -u nullglob
+    fi
+fi
+
+# 2. MOK enrollment inspection
+MOK_KEY_PATH=""
+MOK_STATUS="no_local_key"
+MOK_ENROLLED="false"
+
+if MOK_KEY_PATH="$(find_mok_key)"; then
+    if [ "$UEFI_MODE" = "false" ] || ! command -v mokutil >/dev/null 2>&1; then
+        MOK_STATUS="unavailable"
+    else
+        mok_test_rc=0
+        mok_test_out="$(mokutil --test-key "$MOK_KEY_PATH" 2>&1)" || mok_test_rc=$?
+        if printf '%s\n' "$mok_test_out" | grep -qiE 'is already enrolled|is already in db'; then
+            MOK_STATUS="enrolled"
+            MOK_ENROLLED="true"
+        elif printf '%s\n' "$mok_test_out" | grep -qi 'is already in the enrollment request'; then
+            MOK_STATUS="pending"
+        elif printf '%s\n' "$mok_test_out" | grep -qi 'is not enrolled'; then
+            MOK_STATUS="not_enrolled"
+        elif printf '%s\n' "$mok_test_out" | grep -qiE 'not supported|failed to|error|permission denied'; then
+            MOK_STATUS="unknown"
+        elif [ "$mok_test_rc" -eq 0 ]; then
+            MOK_STATUS="enrolled"
+            MOK_ENROLLED="true"
+        else
+            MOK_STATUS="not_enrolled"
+        fi
+    fi
+else
+    MOK_KEY_PATH=""
+fi
+
+# 3. TPM 2.0 presence
+TPM2_PRESENT="false"
+TPM_VERSION="none"
+TPM_DEVICE="none"
+
+if [ -c /dev/tpmrm0 ]; then
+    TPM2_PRESENT="true"
+    TPM_VERSION="2.0"
+    TPM_DEVICE="/dev/tpmrm0"
+elif [ -d /sys/class/tpm/tpm0 ]; then
+    TPM_DEVICE="/sys/class/tpm/tpm0"
+    if [ -r /sys/class/tpm/tpm0/tpm_version_major ]; then
+        tpm_major="$(tr -d '[:space:]' < /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null || true)"
+        if [ "$tpm_major" = "2" ]; then
+            TPM2_PRESENT="true"
+            TPM_VERSION="2.0"
+        elif [ -n "$tpm_major" ]; then
+            TPM_VERSION="${tpm_major}"
+        fi
+    fi
+elif [ -c /dev/tpm0 ]; then
+    TPM_DEVICE="/dev/tpm0"
+    TPM_VERSION="unknown"
+fi
+
+# 4. Kernel lockdown (/sys/kernel/security/lockdown checking [integrity])
+LOCKDOWN_RAW="unavailable"
+LOCKDOWN_MODE="unavailable"
+LOCKDOWN_INTEGRITY="false"
+CMDLINE_LOCKDOWN_INTEGRITY="false"
+
+if printf '%s\n' "$CMDLINE" | grep -Eq '(^|[[:space:]])lockdown=integrity([[:space:]]|$)'; then
+    CMDLINE_LOCKDOWN_INTEGRITY="true"
+fi
+
+if [ -r /sys/kernel/security/lockdown ]; then
+    LOCKDOWN_RAW="$(tr -d '\r\n' < /sys/kernel/security/lockdown 2>/dev/null || true)"
+    if [[ "$LOCKDOWN_RAW" =~ \[([A-Za-z0-9_-]+)\] ]]; then
+        LOCKDOWN_MODE="${BASH_REMATCH[1]}"
+    elif [ -n "$LOCKDOWN_RAW" ]; then
+        LOCKDOWN_MODE="$LOCKDOWN_RAW"
+    fi
+    if [ "$LOCKDOWN_MODE" = "integrity" ] || [ "$LOCKDOWN_MODE" = "confidentiality" ]; then
+        LOCKDOWN_INTEGRITY="true"
+    fi
+fi
+
+# 5. IOMMU (cmdline iommu.passthrough=0 + /sys/kernel/iommu_groups)
+CMDLINE_IOMMU_PASSTHROUGH_0="false"
+if printf '%s\n' "$CMDLINE" | grep -Eq '(^|[[:space:]])iommu\.passthrough=0([[:space:]]|$)'; then
+    CMDLINE_IOMMU_PASSTHROUGH_0="true"
+fi
+
+IOMMU_GROUPS_COUNT=0
+if [ -d /sys/kernel/iommu_groups ]; then
+    shopt -s nullglob
+    iommu_dirs=(/sys/kernel/iommu_groups/*)
+    shopt -u nullglob
+    IOMMU_GROUPS_COUNT="${#iommu_dirs[@]}"
+fi
+
+IOMMU_GROUPS_ACTIVE="false"
+if [ "$IOMMU_GROUPS_COUNT" -gt 0 ]; then
+    IOMMU_GROUPS_ACTIVE="true"
+fi
+
+# 6. kernel.kexec_load_disabled
+KEXEC_LOAD_DISABLED="unknown"
+KEXEC_DISABLED_ACTIVE="false"
+if [ -r /proc/sys/kernel/kexec_load_disabled ]; then
+    KEXEC_LOAD_DISABLED="$(tr -d '[:space:]' < /proc/sys/kernel/kexec_load_disabled 2>/dev/null || echo unknown)"
+elif command -v sysctl >/dev/null 2>&1; then
+    KEXEC_LOAD_DISABLED="$(sysctl -n kernel.kexec_load_disabled 2>/dev/null || echo unknown)"
+fi
+if [ "$KEXEC_LOAD_DISABLED" = "1" ]; then
+    KEXEC_DISABLED_ACTIVE="true"
+fi
+
+SYSCTL_PERSISTED="false"
+if [ -f "$SYSCTL_EAC_CONF" ] && grep -Eq '^[[:space:]]*kernel\.kexec_load_disabled[[:space:]]*=[[:space:]]*1([[:space:]]*(#.*)?)?$' "$SYSCTL_EAC_CONF" 2>/dev/null; then
+    SYSCTL_PERSISTED="true"
+fi
+
+# 7. Active LSM list (/sys/kernel/security/lsm -> selinux AND bpf)
+LSM_LIST="unavailable"
+SELINUX_LSM_ACTIVE="false"
+BPF_LSM_ACTIVE="false"
+SELINUX_ENFORCE="unknown"
+
+if [ -r /sys/kernel/security/lsm ]; then
+    LSM_LIST="$(tr -d '[:space:]' < /sys/kernel/security/lsm 2>/dev/null || echo unavailable)"
+    if [[ ",${LSM_LIST}," == *",selinux,"* ]]; then
+        SELINUX_LSM_ACTIVE="true"
+    fi
+    if [[ ",${LSM_LIST}," == *",bpf,"* ]]; then
+        BPF_LSM_ACTIVE="true"
+    fi
+fi
+
+if command -v getenforce >/dev/null 2>&1; then
+    SELINUX_ENFORCE="$(getenforce 2>/dev/null || echo unknown)"
+fi
+
+# 8. Posture summary & reboot pending indicator
+REBOOT_PENDING="false"
+if [ "$SYSCTL_PERSISTED" = "true" ] && { [ "$CMDLINE_LOCKDOWN_INTEGRITY" = "false" ] || [ "$CMDLINE_IOMMU_PASSTHROUGH_0" = "false" ] || [ "$LOCKDOWN_INTEGRITY" = "false" ]; }; then
+    REBOOT_PENDING="true"
+fi
+
+MOK_OK="true"
+if [ -n "$MOK_KEY_PATH" ] && [ "$SB_ENABLED" = "true" ] && [ "$MOK_ENROLLED" = "false" ]; then
+    MOK_OK="false"
+fi
+
+EAC_V2_READY="false"
+if [ "$SB_ENABLED" = "true" ] \
+    && [ "$MOK_OK" = "true" ] \
+    && [ "$TPM2_PRESENT" = "true" ] \
+    && [ "$LOCKDOWN_INTEGRITY" = "true" ] \
+    && [ "$CMDLINE_IOMMU_PASSTHROUGH_0" = "true" ] \
+    && [ "$KEXEC_DISABLED_ACTIVE" = "true" ] \
+    && [ "$SELINUX_LSM_ACTIVE" = "true" ] \
+    && [ "$BPF_LSM_ACTIVE" = "true" ]; then
+    EAC_V2_READY="true"
+fi
+
+POSTURE_LEVEL="standard"
+if [ "$EAC_V2_READY" = "true" ]; then
+    POSTURE_LEVEL="hardened"
+elif [ "$SYSCTL_PERSISTED" = "true" ] || [ "$LOCKDOWN_INTEGRITY" = "true" ] || [ "$KEXEC_DISABLED_ACTIVE" = "true" ] || [ "$CMDLINE_IOMMU_PASSTHROUGH_0" = "true" ]; then
+    POSTURE_LEVEL="partial"
+fi
+
+if [ "$JSON_OUTPUT" -eq 1 ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - \
+            "$LIVE_SESSION" \
+            "$UEFI_MODE" \
+            "$SB_STATE" \
+            "$SB_ENABLED" \
+            "$SB_SOURCE" \
+            "$MOK_KEY_PATH" \
+            "$MOK_STATUS" \
+            "$MOK_ENROLLED" \
+            "$TPM2_PRESENT" \
+            "$TPM_VERSION" \
+            "$TPM_DEVICE" \
+            "$LOCKDOWN_MODE" \
+            "$LOCKDOWN_RAW" \
+            "$LOCKDOWN_INTEGRITY" \
+            "$CMDLINE_LOCKDOWN_INTEGRITY" \
+            "$CMDLINE_IOMMU_PASSTHROUGH_0" \
+            "$IOMMU_GROUPS_COUNT" \
+            "$IOMMU_GROUPS_ACTIVE" \
+            "$KEXEC_LOAD_DISABLED" \
+            "$KEXEC_DISABLED_ACTIVE" \
+            "$SYSCTL_PERSISTED" \
+            "$LSM_LIST" \
+            "$SELINUX_LSM_ACTIVE" \
+            "$BPF_LSM_ACTIVE" \
+            "$SELINUX_ENFORCE" \
+            "$REBOOT_PENDING" \
+            "$EAC_V2_READY" \
+            "$POSTURE_LEVEL" <<'PYEOF'
+import json
+import sys
+
+(
+    live_session,
+    uefi_mode,
+    sb_state,
+    sb_enabled,
+    sb_source,
+    mok_key_path,
+    mok_status,
+    mok_enrolled,
+    tpm2_present,
+    tpm_version,
+    tpm_device,
+    lockdown_mode,
+    lockdown_raw,
+    lockdown_integrity,
+    cmdline_lockdown_integrity,
+    cmdline_iommu_passthrough_0,
+    iommu_groups_count,
+    iommu_groups_active,
+    kexec_load_disabled,
+    kexec_disabled_active,
+    sysctl_persisted,
+    lsm_list,
+    selinux_lsm_active,
+    bpf_lsm_active,
+    selinux_enforce,
+    reboot_pending,
+    eac_v2_ready,
+    posture_level,
+) = sys.argv[1:29]
+
+def to_bool(val):
+    return val == "true"
+
+try:
+    iommu_count_int = int(iommu_groups_count)
+except ValueError:
+    iommu_count_int = 0
+
+try:
+    kexec_val = int(kexec_load_disabled)
+except ValueError:
+    kexec_val = kexec_load_disabled
+
+lsm_tokens = [tok for tok in lsm_list.split(",") if tok and tok != "unavailable"]
+
+payload = {
+    "schema_version": 1,
+    "live_session": to_bool(live_session),
+    "uefi": to_bool(uefi_mode),
+    "secure_boot": {
+        "state": sb_state,
+        "enabled": to_bool(sb_enabled),
+        "source": sb_source,
+    },
+    "mok": {
+        "key_path": mok_key_path if mok_key_path else None,
+        "status": mok_status,
+        "enrolled": to_bool(mok_enrolled),
+    },
+    "tpm2": {
+        "present": to_bool(tpm2_present),
+        "version": tpm_version,
+        "device": tpm_device,
+    },
+    "lockdown": {
+        "mode": lockdown_mode,
+        "raw": lockdown_raw,
+        "integrity_active": to_bool(lockdown_integrity),
+        "cmdline_lockdown_integrity": to_bool(cmdline_lockdown_integrity),
+    },
+    "iommu": {
+        "cmdline_passthrough_disabled": to_bool(cmdline_iommu_passthrough_0),
+        "groups_count": iommu_count_int,
+        "groups_active": to_bool(iommu_groups_active),
+    },
+    "kexec": {
+        "kexec_load_disabled": kexec_val,
+        "disabled": to_bool(kexec_disabled_active),
+        "sysctl_persisted": to_bool(sysctl_persisted),
+    },
+    "lsm": {
+        "raw": lsm_list,
+        "active": lsm_tokens,
+        "selinux_active": to_bool(selinux_lsm_active),
+        "bpf_active": to_bool(bpf_lsm_active),
+        "selinux_enforce": selinux_enforce,
+    },
+    "posture": {
+        "level": posture_level,
+        "eac_v2_ready": to_bool(eac_v2_ready),
+        "reboot_pending": to_bool(reboot_pending),
+    },
+    "compatibility": {
+        "supported": [
+            "Proton-enabled Easy Anti-Cheat (e.g., Elden Ring, Apex Legends)",
+            "Proton-enabled BattlEye",
+            "Valve Anti-Cheat / VAC (Counter-Strike 2)",
+            "Server-side anti-cheat and offline/DRM-free games",
+        ],
+        "incompatible": [
+            "Riot Vanguard (Valorant, League of Legends) — requires Windows ring-0 driver",
+            "Call of Duty Ricochet — requires Windows kernel driver",
+            "Fortnite (Epic Easy Anti-Cheat Linux support disabled by publisher)",
+        ],
+        "dual_boot_recommendation": "Use 'ujust reboot-windows' for Windows ring-0 anti-cheat titles.",
+    },
+}
+print(json.dumps(payload, indent=2))
+PYEOF
+    else
+        printf '{"schema_version":1,"live_session":%s,"uefi":%s,"secure_boot":{"state":"%s","enabled":%s},"mok":{"status":"%s","enrolled":%s},"tpm2":{"present":%s,"version":"%s"},"lockdown":{"mode":"%s","integrity_active":%s},"iommu":{"cmdline_passthrough_disabled":%s,"groups_count":%s},"kexec":{"disabled":%s,"sysctl_persisted":%s},"lsm":{"selinux_active":%s,"bpf_active":%s},"posture":{"level":"%s","eac_v2_ready":%s}}\n' \
+            "$LIVE_SESSION" \
+            "$UEFI_MODE" \
+            "$SB_STATE" \
+            "$SB_ENABLED" \
+            "$MOK_STATUS" \
+            "$MOK_ENROLLED" \
+            "$TPM2_PRESENT" \
+            "$TPM_VERSION" \
+            "$LOCKDOWN_MODE" \
+            "$LOCKDOWN_INTEGRITY" \
+            "$CMDLINE_IOMMU_PASSTHROUGH_0" \
+            "$IOMMU_GROUPS_COUNT" \
+            "$KEXEC_DISABLED_ACTIVE" \
+            "$SYSCTL_PERSISTED" \
+            "$SELINUX_LSM_ACTIVE" \
+            "$BPF_LSM_ACTIVE" \
+            "$POSTURE_LEVEL" \
+            "$EAC_V2_READY"
+    fi
+    exit 0
+fi
+
+echo "================================================================================"
+echo "               Kushagra OS Linux EAC v2 Posture Status                          "
+echo "================================================================================"
+
+if [ "$LIVE_SESSION" = "true" ]; then
+    echo "[INFO] Session Mode       : LiveCD (rd.live.image — persistence disabled)"
+fi
+
+if [ "$SB_ENABLED" = "true" ]; then
+    echo "[PASS] Secure Boot        : ENABLED (source: ${SB_SOURCE})"
+elif [ "$SB_STATE" = "unsupported" ]; then
+    echo "[INFO] Secure Boot        : UNSUPPORTED (Legacy BIOS / non-UEFI)"
+else
+    echo "[WARN] Secure Boot        : ${SB_STATE} (source: ${SB_SOURCE})"
+fi
+
+if [ -n "$MOK_KEY_PATH" ]; then
+    case "$MOK_STATUS" in
+        enrolled)
+            echo "[PASS] MOK Enrollment     : ENROLLED (${MOK_KEY_PATH})"
+            ;;
+        pending)
+            echo "[INFO] MOK Enrollment     : PENDING REBOOT (${MOK_KEY_PATH})"
+            ;;
+        not_enrolled)
+            echo "[WARN] MOK Enrollment     : NOT ENROLLED (${MOK_KEY_PATH})"
+            ;;
+        *)
+            echo "[WARN] MOK Enrollment     : ${MOK_STATUS} (${MOK_KEY_PATH})"
+            ;;
+    esac
+else
+    echo "[INFO] MOK Enrollment     : No local akmods/ublue .der key present"
+fi
+
+if [ "$TPM2_PRESENT" = "true" ]; then
+    echo "[PASS] TPM 2.0            : PRESENT (${TPM_DEVICE}, version ${TPM_VERSION})"
+else
+    echo "[WARN] TPM 2.0            : NOT DETECTED (device=${TPM_DEVICE}, version=${TPM_VERSION})"
+fi
+
+if [ "$LOCKDOWN_MODE" = "integrity" ]; then
+    echo "[PASS] Kernel Lockdown    : [integrity] active (${LOCKDOWN_RAW})"
+elif [ "$LOCKDOWN_MODE" = "confidentiality" ]; then
+    echo "[PASS] Kernel Lockdown    : [confidentiality] active (${LOCKDOWN_RAW})"
+else
+    echo "[WARN] Kernel Lockdown    : ${LOCKDOWN_MODE} (expected [integrity]; cmdline=${CMDLINE_LOCKDOWN_INTEGRITY})"
+fi
+
+if [ "$CMDLINE_IOMMU_PASSTHROUGH_0" = "true" ] && [ "$IOMMU_GROUPS_ACTIVE" = "true" ]; then
+    echo "[PASS] IOMMU DMA Remap    : iommu.passthrough=0 active (${IOMMU_GROUPS_COUNT} IOMMU group(s))"
+elif [ "$CMDLINE_IOMMU_PASSTHROUGH_0" = "true" ]; then
+    echo "[WARN] IOMMU DMA Remap    : iommu.passthrough=0 set, but 0 IOMMU groups in /sys/kernel/iommu_groups (enable VT-d/AMD-Vi in BIOS)"
+elif [ "$IOMMU_GROUPS_ACTIVE" = "true" ]; then
+    echo "[INFO] IOMMU DMA Remap    : ${IOMMU_GROUPS_COUNT} group(s) present, but iommu.passthrough=0 not set in /proc/cmdline"
+else
+    echo "[WARN] IOMMU DMA Remap    : iommu.passthrough=0 missing and 0 IOMMU groups detected"
+fi
+
+if [ "$KEXEC_DISABLED_ACTIVE" = "true" ]; then
+    echo "[PASS] kexec Lock         : kernel.kexec_load_disabled = 1 (persisted=${SYSCTL_PERSISTED})"
+else
+    echo "[WARN] kexec Lock         : kernel.kexec_load_disabled = ${KEXEC_LOAD_DISABLED} (persisted=${SYSCTL_PERSISTED})"
+fi
+
+if [ "$SELINUX_LSM_ACTIVE" = "true" ] && [ "$BPF_LSM_ACTIVE" = "true" ]; then
+    echo "[PASS] Active LSMs        : selinux (${SELINUX_ENFORCE}) + bpf active [${LSM_LIST}]"
+elif [ "$SELINUX_LSM_ACTIVE" = "true" ]; then
+    echo "[WARN] Active LSMs        : selinux (${SELINUX_ENFORCE}) active, bpf missing [${LSM_LIST}]"
+else
+    echo "[FAIL] Active LSMs        : SELinux NOT active in /sys/kernel/security/lsm [${LSM_LIST}]"
+fi
+
+echo "--------------------------------------------------------------------------------"
+echo "Overall EAC v2 Posture    : ${POSTURE_LEVEL} (ready=${EAC_V2_READY}, reboot_pending=${REBOOT_PENDING})"
+echo ""
+echo "Honest Linux Anti-Cheat Compatibility Policy:"
+echo "  [SUPPORTED] Proton EAC & BattlEye (when publisher enables Linux support, e.g.,"
+echo "              Elden Ring, Apex Legends), Valve VAC (CS2), server-side anti-cheat."
+echo "  [INCOMPATIBLE] Windows ring-0 kernel anti-cheat: Riot Vanguard (Valorant / LoL),"
+echo "                 Call of Duty Ricochet, Fortnite (Epic EAC Linux disabled)."
+echo "                 For incompatible titles, dual-boot Windows via 'ujust reboot-windows'."
+echo "================================================================================"
+
+exit 0

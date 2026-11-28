@@ -20,6 +20,7 @@ modules:
       - 03-configure-plymouth-theme.sh
       - 04-build-kwin-glass.sh
       - 05-build-llama-vulkan.sh
+      - 06-patch-greenboot.sh
 
   - type: systemd
     system:
@@ -32,6 +33,7 @@ modules:
         - livesys-late.service
         - kushagra-oobe.service
         - kushagra-dualboot-detect.service
+        - kushagra-flatpak-verified-init.service
       disabled:
         - plasma-setup.service
 
@@ -42,7 +44,7 @@ modules:
       NAME: "Kushagra OS"
       ID: "kushagra-os"
       ID_LIKE: "fedora"
-      PRETTY_NAME: "Kushagra OS 44 (v0.4.0)"
+      PRETTY_NAME: "Kushagra OS 44 (v0.5.0)"
       DEFAULT_HOSTNAME: "kushagra-pc"
       HOME_URL: "https://github.com/kushagra-os"
       SUPPORT_URL: "https://github.com/kushagra-os/kushagra-os/issues"

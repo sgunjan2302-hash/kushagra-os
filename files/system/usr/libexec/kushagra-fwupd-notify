@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS Lightweight LVFS Firmware Update Notifier
+# Replaces heavy/RAM-leaking DiscoverNotifier (KDE Bug 509180) and avoids
+# Discover's fwupd hang (KDE Bug 522169) by querying `fwupdmgr get-updates --json`
+# directly with a strict timeout.
+
+APP_NAME="Kushagra Firmware Monitor"
+RECOVERY_WARNING="Keep your Windows BitLocker and LUKS TPM PCR 7 recovery keys handy before applying UEFI/BIOS capsule updates (fwupdmgr update)."
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-fwupd-notify [--check | --test | --help]
+
+Options:
+  (none)    Query fwupdmgr with timeout 20 and send desktop notification if updates exist.
+  --check   Query fwupdmgr and print firmware update summary cleanly (exits 0).
+  --test    Send a simulated firmware update notification with BitLocker/LUKS PCR 7 warning.
+  --help    Show this help message.
+EOF
+}
+
+send_notification() {
+    local count="$1"
+    local summary_lines="$2"
+    local title="Firmware Updates Available (${count})"
+    local body
+
+    if [ -n "${summary_lines}" ]; then
+        body="${summary_lines}"$'\n\n'"WARNING: ${RECOVERY_WARNING}"
+    else
+        body="Pending LVFS firmware updates detected."$'\n\n'"WARNING: ${RECOVERY_WARNING}"
+    fi
+
+    printf '%s\n%s\n' "${title}" "${body}"
+
+    if command -v notify-send >/dev/null 2>&1; then
+        local bus_sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus"
+        if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || [ -S "${bus_sock}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; then
+            if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${bus_sock}" ]; then
+                DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_sock}" notify-send -a "${APP_NAME}" -u normal -i system-software-update "${title}" "${body}" 2>/dev/null || true
+            else
+                notify-send -a "${APP_NAME}" -u normal -i system-software-update "${title}" "${body}" 2>/dev/null || true
+            fi
+        fi
+    fi
+}
+
+parse_fwupd_updates() {
+    local raw_json="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    print("0")
+    sys.exit(0)
+items = []
+for dev in data.get("Devices", []) or []:
+    name = dev.get("Name") or "Firmware Device"
+    for rel in dev.get("Releases", []) or []:
+        ver = rel.get("Version") or "new"
+        items.append(f"- {name} -> {ver}")
+if not items:
+    for rel in data.get("Releases", []) or []:
+        ver = rel.get("Version") or "new"
+        rname = rel.get("Name") or "Firmware Update"
+        items.append(f"- {rname} -> {ver}")
+print(len(items))
+for line in items[:4]:
+    print(line)
+' <<< "${raw_json}"
+    elif command -v jq >/dev/null 2>&1; then
+        local count lines
+        count="$(printf '%s' "${raw_json}" | jq '[.Devices[]?.Releases[]?, .Releases[]?] | length' 2>/dev/null || echo 0)"
+        lines="$(printf '%s' "${raw_json}" | jq -r '[(.Devices[]? | .Name as $n | .Releases[]? | "- \($n) -> \(.Version // "new")"), (.Releases[]? | "- \(.Name // "Firmware Update") -> \(.Version // "new")")] | .[:4] | .[]' 2>/dev/null || true)"
+        printf '%s\n' "${count}"
+        if [ -n "${lines}" ]; then
+            printf '%s\n' "${lines}"
+        fi
+    else
+        printf '0\n'
+    fi
+}
+
+MODE="${1:-notify}"
+case "${MODE}" in
+    -h|--help|help)
+        usage
+        exit 0
+        ;;
+    --test)
+        send_notification "1" "- Simulated UEFI System Firmware -> 0.0.test"
+        exit 0
+        ;;
+    --check|notify)
+        ;;
+    *)
+        echo "ERROR: Unknown option: ${MODE}" >&2
+        usage >&2
+        exit 1
+        ;;
+esac
+
+if ! command -v fwupdmgr >/dev/null 2>&1; then
+    if [ "${MODE}" = "--check" ]; then
+        echo "fwupdmgr not installed; skipping firmware check."
+    fi
+    exit 0
+fi
+
+RAW_JSON=""
+FW_RC=0
+RAW_JSON="$(timeout 20 fwupdmgr get-updates --json 2>/dev/null)" || FW_RC=$?
+
+# fwupdmgr exits 2 when no updates/updatable devices exist; 124 on timeout; offline exits non-zero cleanly
+if [ "${FW_RC}" -eq 2 ] || [ "${FW_RC}" -eq 124 ] || [ -z "${RAW_JSON}" ]; then
+    if [ "${MODE}" = "--check" ]; then
+        echo "No pending LVFS firmware updates (or daemon offline/timed out; rc=${FW_RC})."
+    fi
+    exit 0
+fi
+
+if [ "${FW_RC}" -ne 0 ]; then
+    if [ "${MODE}" = "--check" ]; then
+        echo "Firmware check skipped cleanly (fwupdmgr rc=${FW_RC})."
+    fi
+    exit 0
+fi
+
+PARSED="$(parse_fwupd_updates "${RAW_JSON}")"
+UPDATE_COUNT="$(printf '%s\n' "${PARSED}" | head -n 1)"
+SUMMARY_FORMATTED="$(printf '%s\n' "${PARSED}" | tail -n +2)"
+
+if [ "${UPDATE_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+    send_notification "${UPDATE_COUNT}" "${SUMMARY_FORMATTED}"
+elif [ "${MODE}" = "--check" ]; then
+    echo "System firmware is up to date (0 pending updates)."
+fi
+
+exit 0

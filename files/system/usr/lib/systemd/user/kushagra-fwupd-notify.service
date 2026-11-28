@@ -1,0 +1,10 @@
+[Unit]
+Description=Kushagra OS Lightweight LVFS Firmware Update Notifier
+ConditionUser=!kushagra-oobe
+ConditionKernelCommandLine=!rd.live.image
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/kushagra-fwupd-notify
+Slice=background.slice

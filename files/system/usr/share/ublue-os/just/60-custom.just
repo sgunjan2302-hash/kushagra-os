@@ -337,3 +337,68 @@ setup-winapps *ARGS:
 # One-time reboot into dual-boot Windows Boot Manager without modifying BootOrder (--check | --dry-run)
 reboot-windows *ARGS:
     @/usr/bin/kushagra-reboot-windows {{ARGS}}
+
+# Opt-in developer mode: switch to Kushagra-DX (`-dx`) image or configure DX containers
+devmode:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Kushagra OS Developer Mode (-dx):"
+    echo "  Current OS image:"
+    bootc status 2>/dev/null || true
+    echo ""
+    if command -v code >/dev/null 2>&1; then
+        echo "[PASS] Kushagra-DX native VS Code RPM ('code') is already installed."
+        echo "Run 'ujust dx-group' to opt into docker/libvirt developer groups and docker.socket."
+    else
+        echo "To rebase onto Kushagra-DX (native VS Code RPM, Podman/Distrobox/Docker opt-in, Homebrew):"
+        echo "  sudo bootc switch ghcr.io/sgunjan2302-hash/kushagra-os-dx:44"
+        echo "For NVIDIA + DX:"
+        echo "  sudo bootc switch ghcr.io/sgunjan2302-hash/kushagra-os-dx-nvidia:44"
+    fi
+
+# Opt-in developer hardware/container groups (docker, libvirt, incus-admin) & docker.socket
+dx-group:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TARGET_USER="${SUDO_USER:-${USER}}"
+    echo "Configuring DX container & virtualization group membership for user '${TARGET_USER}'..."
+    for grp in docker libvirt incus-admin; do
+        if getent group "$grp" >/dev/null 2>&1; then
+            sudo usermod -aG "$grp" "$TARGET_USER"
+            echo "[PASS] Added '${TARGET_USER}' to group '${grp}'."
+        fi
+    done
+    if systemctl list-unit-files docker.socket >/dev/null 2>&1; then
+        sudo systemctl enable --now docker.socket
+        echo "[PASS] Enabled opt-in docker.socket."
+    fi
+    if systemctl --user list-unit-files podman.socket >/dev/null 2>&1; then
+        systemctl --user enable --now podman.socket || true
+    fi
+    echo "Log out and back in for new group memberships to take effect."
+
+# Re-expose unfiltered Flathub system repository (reversing verified-subset focus cleanly)
+flathub-unfilter:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Removing verified-only subset filter on Flathub system remotes..."
+    sudo flatpak remote-add --if-not-exists --system flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    sudo flatpak remote-modify --system --enable --subset= flathub || true
+    if flatpak remotes --system --columns=name 2>/dev/null | grep -qx "flathub-verified"; then
+        sudo flatpak remote-modify --system --subset= flathub-verified || true
+    fi
+    sudo mkdir -p /var/lib
+    sudo touch /var/lib/kushagra-flathub-unfiltered
+    echo "[PASS] Unfiltered Flathub system remote is now active in Flatpak and Bazaar."
+
+# Enroll Universal Blue akmods MOK certificate into UEFI Secure Boot (BitLocker/LUKS PCR 7 warning)
+enroll-secure-boot-key *ARGS:
+    @/usr/bin/kushagra-mok-enroll {{ARGS}}
+
+# Inspect Secure Boot, TPM 2.0, kernel lockdown, IOMMU, kexec & SELinux+BPF posture for Linux EAC v2
+eac-status *ARGS:
+    @/usr/bin/kushagra-eac-status {{ARGS}}
+
+# Enable, disable, or inspect Linux Anti-Cheat (EAC v2) kernel hardening posture (status|enable|disable)
+eac-mode *ARGS:
+    @/usr/bin/kushagra-eac-mode {{ARGS}}

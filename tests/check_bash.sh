@@ -9,11 +9,18 @@ for s in \
     files/system/usr/libexec/kushagra-oobe-apply \
     files/system/usr/libexec/kushagra-apply-user-layout \
     files/system/usr/libexec/kushagra-installer-autostart \
+    files/system/usr/libexec/kushagra-dualboot-grub \
+    files/system/usr/libexec/kushagra-flatpak-verified-init \
+    files/system/usr/libexec/kushagra-fwupd-notify \
     files/system/usr/libexec/kushagra-kavach-dns \
     files/system/usr/libexec/kushagra-usbguard-setup \
     files/system/usr/libexec/kushagra-lan-mirror \
     files/system/usr/libexec/kushagra-resolve-setup \
     files/system/usr/libexec/kushagra-winapps-setup \
+    files/system/usr/lib/greenboot/check/required.d/*.sh \
+    files/system/usr/lib/greenboot/check/wanted.d/*.sh \
+    files/system/usr/lib/greenboot/red.d/*.sh \
+    files/system/usr/lib/greenboot/green.d/*.sh \
     files/system/usr/lib/systemd/system-generators/kushagra-live-plymouth-generator \
     files/system/usr/share/kushagra-os/livesys/livesys-session-extra; do
     bash -n "$s"

@@ -277,7 +277,7 @@ Usage: kushagra-glass-toggle [on|off|auto|force-on|status] [--json] [--force] [-
 Commands:
   on        Enable Liquid Glass blur (sets BlurStrength=6, NoiseStrength=2, Translucency=off)
   off       Disable Liquid Glass blur (performance / low-RAM safe mode)
-  auto      Evaluate hardware guard (disables on <= 4.5 GiB RAM or llvmpipe)
+  auto      Evaluate hardware guard (disables on < 3.5 GiB emergency RAM or sw-GPU)
   force-on  Enable Liquid Glass blur and override hardware guard
   status    Show current Liquid Glass state (add --json for machine-readable output)
 EOF

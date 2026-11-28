@@ -76,3 +76,13 @@ install:
     # --- Desktop Utilities & Phone Connectivity ---
     - plasma-firewall
     - kde-connect
+
+    # --- Self-Healing Rollback, LVFS Firmware & Native bootc Partitioning Tools ---
+    # Rule: Include greenboot (greenboot-rs) WITHOUT greenboot-default-health-checks
+    - greenboot
+    - fwupd
+    - jq
+    - parted
+    - dosfstools
+    - e2fsprogs
+    - btrfs-progs

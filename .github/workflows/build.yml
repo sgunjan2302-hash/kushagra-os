@@ -30,8 +30,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bluebuild:
-    name: Build and Push OCI Image
+  bluebuild-base:
+    name: Build Base OCI Image (kushagra-os)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -39,7 +39,7 @@ jobs:
       actions: write
       id-token: write
     steps:
-      - name: Build Kushagra OS Image
+      - name: Build Kushagra OS Base Image
         uses: blue-build/github-action@v1.14.0
         with:
           recipe: recipe.yml
@@ -47,10 +47,55 @@ jobs:
           registry_token: ${{ github.token }}
           pr_event_number: ${{ github.event.number }}
           maximize_build_space: 'true'
-          # Set chunkah: 'false' for fast iteration during testing.
-          # For production releases, toggle chunkah: 'true' to reduce pull bandwidth.
-          # NEVER use deprecated rechunk: 'true'.
-          chunkah: 'false'
+          chunkah: 'true'
+          squash: 'false'
+          build_chunked_oci: 'false'
+
+      - name: Checkout Repository for Verification & R2 Sync
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+
+      - name: Verify Layer Count (<= 96) & Cosign Signature
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE_REF="ghcr.io/${OWNER}/kushagra-os:44"
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if command -v docker >/dev/null 2>&1; then
+            echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null 2>&1 || true
+          fi
+          RAW_MANIFEST="$(skopeo inspect --raw "docker://${IMAGE_REF}")"
+          LAYER_COUNT="$(printf '%s' "$RAW_MANIFEST" | jq -r '(.layers // []) | length')"
+          if [ -z "$LAYER_COUNT" ] || [ "$LAYER_COUNT" = "null" ] || [ "$LAYER_COUNT" -eq 0 ]; then
+            AMD64_DIGEST="$(printf '%s' "$RAW_MANIFEST" | jq -r '.manifests[]? | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest' | head -n 1)"
+            if [ -n "$AMD64_DIGEST" ] && [ "$AMD64_DIGEST" != "null" ]; then
+              LAYER_COUNT="$(skopeo inspect --raw "docker://ghcr.io/${OWNER}/kushagra-os@${AMD64_DIGEST}" | jq -r '(.layers // []) | length')"
+            fi
+          fi
+          echo "Image ${IMAGE_REF} layer count: ${LAYER_COUNT}"
+          if [ -z "$LAYER_COUNT" ] || [ "$LAYER_COUNT" = "null" ] || [ "$LAYER_COUNT" -le 0 ] || [ "$LAYER_COUNT" -gt 96 ]; then
+            echo "::error::Image ${IMAGE_REF} layer count (${LAYER_COUNT}) exceeds 96-layer limit or is invalid" >&2
+            exit 1
+          fi
+          if command -v cosign >/dev/null 2>&1; then
+            cosign verify --key cosign.pub "${IMAGE_REF}"
+          else
+            echo "[WARN] cosign not installed on runner; skipping cosign verification."
+          fi
+
+      - name: Sync OCI Directory to Cloudflare R2
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          bash files/scripts/r2-sync-oci.sh "ghcr.io/${OWNER}/kushagra-os:44"
 
       - name: Trigger LiveCD ISO Build with Exact Digest
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -58,8 +103,213 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
           echo "Resolving exact container digest from GHCR..."
-          DIGEST="$(skopeo inspect docker://ghcr.io/${{ github.repository_owner }}/kushagra-os:44 --format '{{.Digest}}' 2>/dev/null || true)"
+          DIGEST="$(skopeo inspect "docker://ghcr.io/${OWNER}/kushagra-os:44" --format '{{.Digest}}' 2>/dev/null || true)"
           echo "Pushed container digest: ${DIGEST}"
           echo "Triggering LiveCD ISO workflow with immutable digest to eliminate race conditions..."
           gh workflow run iso.yml -f image_tag="44" -f image_digest="${DIGEST}"
+
+  bluebuild-dx:
+    name: Build DX OCI Image (kushagra-os-dx)
+    if: github.event_name != 'pull_request'
+    needs: [bluebuild-base]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Build Kushagra OS DX Image
+        uses: blue-build/github-action@v1.14.0
+        with:
+          recipe: recipe-dx.yml
+          cosign_private_key: ${{ secrets.SIGNING_SECRET }}
+          registry_token: ${{ github.token }}
+          pr_event_number: ${{ github.event.number }}
+          maximize_build_space: 'true'
+          chunkah: 'true'
+          squash: 'false'
+          build_chunked_oci: 'false'
+
+      - name: Checkout Repository for Verification & R2 Sync
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+
+      - name: Verify Layer Count (<= 96) & Cosign Signature
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE_REF="ghcr.io/${OWNER}/kushagra-os-dx:44"
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if command -v docker >/dev/null 2>&1; then
+            echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null 2>&1 || true
+          fi
+          RAW_MANIFEST="$(skopeo inspect --raw "docker://${IMAGE_REF}")"
+          LAYER_COUNT="$(printf '%s' "$RAW_MANIFEST" | jq -r '(.layers // []) | length')"
+          if [ -z "$LAYER_COUNT" ] || [ "$LAYER_COUNT" = "null" ] || [ "$LAYER_COUNT" -eq 0 ]; then
+            AMD64_DIGEST="$(printf '%s' "$RAW_MANIFEST" | jq -r '.manifests[]? | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest' | head -n 1)"
+            if [ -n "$AMD64_DIGEST" ] && [ "$AMD64_DIGEST" != "null" ]; then
+              LAYER_COUNT="$(skopeo inspect --raw "docker://ghcr.io/${OWNER}/kushagra-os-dx@${AMD64_DIGEST}" | jq -r '(.layers // []) | length')"
+            fi
+          fi
+          echo "Image ${IMAGE_REF} layer count: ${LAYER_COUNT}"
+          if [ -z "$LAYER_COUNT" ] || [ "$LAYER_COUNT" = "null" ] || [ "$LAYER_COUNT" -le 0 ] || [ "$LAYER_COUNT" -gt 96 ]; then
+            echo "::error::Image ${IMAGE_REF} layer count (${LAYER_COUNT}) exceeds 96-layer limit or is invalid" >&2
+            exit 1
+          fi
+          if command -v cosign >/dev/null 2>&1; then
+            cosign verify --key cosign.pub "${IMAGE_REF}"
+          else
+            echo "[WARN] cosign not installed on runner; skipping cosign verification."
+          fi
+
+      - name: Sync OCI Directory to Cloudflare R2
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          bash files/scripts/r2-sync-oci.sh "ghcr.io/${OWNER}/kushagra-os-dx:44"
+
+  bluebuild-nvidia:
+    name: Build NVIDIA OCI Image (kushagra-os-nvidia)
+    if: github.event_name != 'pull_request'
+    needs: [bluebuild-base]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Build Kushagra OS NVIDIA Image
+        uses: blue-build/github-action@v1.14.0
+        with:
+          recipe: recipe-nvidia.yml
+          cosign_private_key: ${{ secrets.SIGNING_SECRET }}
+          registry_token: ${{ github.token }}
+          pr_event_number: ${{ github.event.number }}
+          maximize_build_space: 'true'
+          chunkah: 'true'
+          squash: 'false'
+          build_chunked_oci: 'false'
+
+      - name: Checkout Repository for Verification & R2 Sync
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+
+      - name: Verify Layer Count (<= 96) & Cosign Signature
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE_REF="ghcr.io/${OWNER}/kushagra-os-nvidia:44"
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if command -v docker >/dev/null 2>&1; then
+            echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null 2>&1 || true
+          fi
+          RAW_MANIFEST="$(skopeo inspect --raw "docker://${IMAGE_REF}")"
+          LAYER_COUNT="$(printf '%s' "$RAW_MANIFEST" | jq -r '(.layers // []) | length')"
+          if [ -z "$LAYER_COUNT" ] || [ "$LAYER_COUNT" = "null" ] || [ "$LAYER_COUNT" -eq 0 ]; then
+            AMD64_DIGEST="$(printf '%s' "$RAW_MANIFEST" | jq -r '.manifests[]? | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest' | head -n 1)"
+            if [ -n "$AMD64_DIGEST" ] && [ "$AMD64_DIGEST" != "null" ]; then
+              LAYER_COUNT="$(skopeo inspect --raw "docker://ghcr.io/${OWNER}/kushagra-os-nvidia@${AMD64_DIGEST}" | jq -r '(.layers // []) | length')"
+            fi
+          fi
+          echo "Image ${IMAGE_REF} layer count: ${LAYER_COUNT}"
+          if [ -z "$LAYER_COUNT" ] || [ "$LAYER_COUNT" = "null" ] || [ "$LAYER_COUNT" -le 0 ] || [ "$LAYER_COUNT" -gt 96 ]; then
+            echo "::error::Image ${IMAGE_REF} layer count (${LAYER_COUNT}) exceeds 96-layer limit or is invalid" >&2
+            exit 1
+          fi
+          if command -v cosign >/dev/null 2>&1; then
+            cosign verify --key cosign.pub "${IMAGE_REF}"
+          else
+            echo "[WARN] cosign not installed on runner; skipping cosign verification."
+          fi
+
+      - name: Sync OCI Directory to Cloudflare R2
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          bash files/scripts/r2-sync-oci.sh "ghcr.io/${OWNER}/kushagra-os-nvidia:44"
+
+  bluebuild-dx-nvidia:
+    name: Build DX + NVIDIA OCI Image (kushagra-os-dx-nvidia)
+    if: github.event_name != 'pull_request'
+    needs: [bluebuild-dx]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Build Kushagra OS DX + NVIDIA Image
+        uses: blue-build/github-action@v1.14.0
+        with:
+          recipe: recipe-dx-nvidia.yml
+          cosign_private_key: ${{ secrets.SIGNING_SECRET }}
+          registry_token: ${{ github.token }}
+          pr_event_number: ${{ github.event.number }}
+          maximize_build_space: 'true'
+          chunkah: 'true'
+          squash: 'false'
+          build_chunked_oci: 'false'
+
+      - name: Checkout Repository for Verification & R2 Sync
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+
+      - name: Verify Layer Count (<= 96) & Cosign Signature
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE_REF="ghcr.io/${OWNER}/kushagra-os-dx-nvidia:44"
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if command -v docker >/dev/null 2>&1; then
+            echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null 2>&1 || true
+          fi
+          RAW_MANIFEST="$(skopeo inspect --raw "docker://${IMAGE_REF}")"
+          LAYER_COUNT="$(printf '%s' "$RAW_MANIFEST" | jq -r '(.layers // []) | length')"
+          if [ -z "$LAYER_COUNT" ] || [ "$LAYER_COUNT" = "null" ] || [ "$LAYER_COUNT" -eq 0 ]; then
+            AMD64_DIGEST="$(printf '%s' "$RAW_MANIFEST" | jq -r '.manifests[]? | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest' | head -n 1)"
+            if [ -n "$AMD64_DIGEST" ] && [ "$AMD64_DIGEST" != "null" ]; then
+              LAYER_COUNT="$(skopeo inspect --raw "docker://ghcr.io/${OWNER}/kushagra-os-dx-nvidia@${AMD64_DIGEST}" | jq -r '(.layers // []) | length')"
+            fi
+          fi
+          echo "Image ${IMAGE_REF} layer count: ${LAYER_COUNT}"
+          if [ -z "$LAYER_COUNT" ] || [ "$LAYER_COUNT" = "null" ] || [ "$LAYER_COUNT" -le 0 ] || [ "$LAYER_COUNT" -gt 96 ]; then
+            echo "::error::Image ${IMAGE_REF} layer count (${LAYER_COUNT}) exceeds 96-layer limit or is invalid" >&2
+            exit 1
+          fi
+          if command -v cosign >/dev/null 2>&1; then
+            cosign verify --key cosign.pub "${IMAGE_REF}"
+          else
+            echo "[WARN] cosign not installed on runner; skipping cosign verification."
+          fi
+
+      - name: Sync OCI Directory to Cloudflare R2
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          bash files/scripts/r2-sync-oci.sh "ghcr.io/${OWNER}/kushagra-os-dx-nvidia:44"

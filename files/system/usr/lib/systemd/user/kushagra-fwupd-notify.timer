@@ -1,0 +1,13 @@
+[Unit]
+Description=Kushagra OS Periodic LVFS Firmware Update Check
+ConditionUser=!kushagra-oobe
+ConditionKernelCommandLine=!rd.live.image
+
+[Timer]
+OnStartupSec=10min
+OnUnitActiveSec=1d
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,3 @@
+# Kushagra OS DX default user unit presets
+enable podman.socket
+enable kushagra-fwupd-notify.timer

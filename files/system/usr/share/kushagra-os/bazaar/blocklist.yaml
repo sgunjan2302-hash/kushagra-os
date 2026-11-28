@@ -1,0 +1,13 @@
+# Kushagra OS Bazaar Application Blocklist
+#
+# Hides Flatpak Visual Studio Code (com.visualstudio.code) because Kushagra-DX
+# provides the native `code` RPM without Flatpak sandbox or Wayland IME friction.
+# Verified Flatpaks (including Bazaar itself: io.github.kolunmi.Bazaar) remain
+# explicitly allowed and visible.
+
+blocklists:
+  - priority: 0
+    block:
+      - com.visualstudio.code
+    allow:
+      - io.github.kolunmi.Bazaar

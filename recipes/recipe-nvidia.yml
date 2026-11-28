@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://schema.blue-build.org/recipe-v1.json
+---
+name: kushagra-os-nvidia
+description: Kushagra OS NVIDIA (v0.5.0) - Signed NVIDIA Open Kernel Module variant built on Kushagra OS Fedora Atomic Kinoite 44.
+base-image: ghcr.io/sgunjan2302-hash/kushagra-os
+image-version: 44
+
+modules:
+  - type: files
+    files:
+      - source: system/usr/lib/bootc/kargs.d
+        destination: /usr/lib/bootc/kargs.d
+
+  - type: akmods
+    base: main
+    nvidia-driver: nvidia-open
+
+  - type: os-release
+    properties:
+      NAME: "Kushagra OS"
+      ID: "kushagra-os"
+      ID_LIKE: "fedora"
+      PRETTY_NAME: "Kushagra OS 44 NVIDIA (v0.5.0)"
+
+  - type: signing
+
+  - type: initramfs

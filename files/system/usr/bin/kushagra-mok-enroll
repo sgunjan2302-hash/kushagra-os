@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kushagra OS - Secure Boot MOK Enrollment Helper (NVIDIA / Universal Blue akmods)
+# - Auto-locates Universal Blue / akmods .der certificate
+# - Refuses inside LiveCD (rd.live.image), non-UEFI systems, or when mokutil is absent
+# - Warns prominently about Windows BitLocker & Linux LUKS TPM PCR 7 recovery keys
+# - Uses keyboard-layout-safe numeric PIN (12345678) for UEFI MOK Manager
+
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
+MOK_PIN="12345678"
+MODE="enroll"
+DRY_RUN=0
+YES_FLAG=0
+TEMP_FILES=()
+
+cleanup() {
+    if [ "${#TEMP_FILES[@]}" -gt 0 ]; then
+        rm -f "${TEMP_FILES[@]}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+usage() {
+    cat <<'EOF'
+Usage: kushagra-mok-enroll [OPTIONS]
+
+Options:
+  --check       Inspect UEFI/Secure Boot, locate MOK .der key, and report enrollment status (read-only).
+  --dry-run, -n Preview BitLocker/LUKS PCR 7 warning and exact mokutil commands without modifying NVRAM.
+  --yes, -y     Acknowledge the BitLocker/LUKS TPM PCR 7 warning non-interactively.
+  -h, --help    Show this help message.
+
+Stages enrollment of the Kushagra OS / Universal Blue Secure Boot MOK key using a
+keyboard-layout-safe numeric PIN (12345678) for UEFI MOK Manager.
+EOF
+}
+
+is_live_session() {
+    grep -qw "rd.live.image" /proc/cmdline 2>/dev/null
+}
+
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    elif command -v pkexec >/dev/null 2>&1; then
+        pkexec "$@"
+    else
+        echo "[FAIL] Root privileges (sudo or pkexec) are required to stage MOK enrollment." >&2
+        exit 1
+    fi
+}
+
+find_mok_key() {
+    local candidate=""
+    for candidate in \
+        /etc/pki/akmods/certs/akmods-ublue.der \
+        /etc/pki/akmods/certs/public_key.der; do
+        if [ -f "$candidate" ] && [ -r "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    shopt -s nullglob
+    for candidate in /etc/pki/akmods/certs/*.der /usr/share/ublue-os/*.der; do
+        if [ -f "$candidate" ] && [ -r "$candidate" ]; then
+            shopt -u nullglob
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
+}
+
+get_sb_state() {
+    if [ ! -d /sys/firmware/efi ]; then
+        printf 'legacy-bios\n'
+        return 0
+    fi
+    if ! command -v mokutil >/dev/null 2>&1; then
+        printf 'mokutil-missing\n'
+        return 0
+    fi
+    local sb_out=""
+    sb_out="$(mokutil --sb-state 2>&1 || true)"
+    if printf '%s\n' "$sb_out" | grep -qi 'SecureBoot enabled'; then
+        printf 'enabled\n'
+    elif printf '%s\n' "$sb_out" | grep -qi 'SecureBoot disabled'; then
+        printf 'disabled\n'
+    else
+        printf 'unknown\n'
+    fi
+}
+
+get_mok_key_state() {
+    local key_file="$1"
+    local test_out=""
+    local test_rc=0
+
+    if [ ! -d /sys/firmware/efi ] || ! command -v mokutil >/dev/null 2>&1; then
+        printf 'unavailable\n'
+        return 0
+    fi
+
+    test_out="$(mokutil --test-key "$key_file" 2>&1)" || test_rc=$?
+    if printf '%s\n' "$test_out" | grep -qiE 'is already enrolled|is already in db'; then
+        printf 'enrolled\n'
+    elif printf '%s\n' "$test_out" | grep -qi 'is already in the enrollment request'; then
+        printf 'pending\n'
+    elif printf '%s\n' "$test_out" | grep -qi 'is not enrolled'; then
+        printf 'not_enrolled\n'
+    elif printf '%s\n' "$test_out" | grep -qiE 'not supported|failed to|error|permission denied'; then
+        printf 'unknown\n'
+    elif [ "$test_rc" -eq 0 ]; then
+        printf 'enrolled\n'
+    else
+        printf 'not_enrolled\n'
+    fi
+}
+
+print_pcr7_warning() {
+    cat <<'EOF'
+================================================================================
+CRITICAL RECOVERY WARNING: WINDOWS BITLOCKER & LINUX LUKS TPM PCR 7
+================================================================================
+Enrolling a UEFI Secure Boot MOK key changes TPM PCR 7 measurements!
+
+  1. Windows Dual-Boot (BitLocker):
+     If Windows BitLocker is enabled with TPM auto-unlock, Windows WILL prompt
+     for your 48-digit BitLocker Recovery Key on your next Windows boot.
+     Back up your recovery key (https://aka.ms/myrecoverykey) BEFORE continuing.
+
+  2. Linux LUKS (TPM2 Auto-Unlock):
+     If you bound LUKS disk unlock to TPM2 PCR 7 (systemd-cryptenroll), keep
+     your LUKS recovery passphrase ready for the next reboot and re-bind TPM2
+     after MOK enrollment completes.
+================================================================================
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check)
+            MODE="check"
+            shift
+            ;;
+        --dry-run|-n)
+            DRY_RUN=1
+            shift
+            ;;
+        --yes|-y)
+            YES_FLAG=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "[FAIL] Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+KEY_FILE=""
+if KEY_FILE="$(find_mok_key)"; then
+    :
+else
+    KEY_FILE=""
+fi
+
+SB_STATE="$(get_sb_state)"
+
+if [ "$MODE" = "check" ]; then
+    echo "=== Kushagra OS MOK Enrollment Check ==="
+    if is_live_session; then
+        echo "[WARN] Session Mode: LiveCD (rd.live.image — MOK enrollment disabled in LiveCD)"
+    else
+        echo "[PASS] Session Mode: Installed disk session"
+    fi
+
+    if [ -d /sys/firmware/efi ]; then
+        echo "[PASS] Firmware Mode: UEFI (/sys/firmware/efi present)"
+    else
+        echo "[INFO] Firmware Mode: Legacy BIOS (/sys/firmware/efi missing — MOK unsupported)"
+    fi
+
+    if command -v mokutil >/dev/null 2>&1; then
+        echo "[PASS] mokutil: $(command -v mokutil)"
+    else
+        echo "[WARN] mokutil: not found"
+    fi
+
+    echo "[INFO] Secure Boot State: ${SB_STATE}"
+
+    if [ -n "$KEY_FILE" ]; then
+        echo "[PASS] MOK Certificate: ${KEY_FILE}"
+        KEY_STATE="$(get_mok_key_state "$KEY_FILE")"
+        case "$KEY_STATE" in
+            enrolled)
+                echo "[PASS] Enrollment State: ENROLLED (already active in UEFI MOK database)"
+                ;;
+            pending)
+                echo "[INFO] Enrollment State: PENDING (staged in MokNew; reboot to finish enrollment)"
+                ;;
+            not_enrolled)
+                echo "[WARN] Enrollment State: NOT ENROLLED (run 'ujust enroll-secure-boot-key' or 'kushagra-mok-enroll')"
+                ;;
+            *)
+                echo "[WARN] Enrollment State: ${KEY_STATE}"
+                ;;
+        esac
+    else
+        echo "[INFO] MOK Certificate: none found under /etc/pki/akmods/certs/ or /usr/share/ublue-os/"
+    fi
+    exit 0
+fi
+
+# Refusal guards for enrollment & dry-run
+if is_live_session; then
+    echo "[BLOCKED] MOK enrollment is disabled inside LiveCD sessions (rd.live.image)." >&2
+    echo "Install Kushagra OS to disk first, then run 'kushagra-mok-enroll'." >&2
+    exit 1
+fi
+
+if [ ! -d /sys/firmware/efi ]; then
+    echo "[BLOCKED] UEFI firmware (/sys/firmware/efi) not found. MOK enrollment requires UEFI." >&2
+    exit 1
+fi
+
+if ! command -v mokutil >/dev/null 2>&1; then
+    echo "[BLOCKED] 'mokutil' command not found. Install mokutil before enrolling MOK keys." >&2
+    exit 1
+fi
+
+if [ -z "$KEY_FILE" ]; then
+    echo "[BLOCKED] No Universal Blue / akmods .der certificate found in /etc/pki/akmods/certs/ or /usr/share/ublue-os/." >&2
+    exit 1
+fi
+
+KEY_STATE="$(get_mok_key_state "$KEY_FILE")"
+if [ "$KEY_STATE" = "enrolled" ]; then
+    echo "[PASS] MOK key (${KEY_FILE}) is already enrolled in UEFI MOK database. Nothing to do."
+    exit 0
+fi
+
+if [ "$KEY_STATE" = "pending" ]; then
+    echo "[INFO] MOK key (${KEY_FILE}) is already staged for enrollment on next reboot."
+    echo "Reboot and choose 'Enroll MOK' -> 'Continue' -> 'Yes' in UEFI MOK Manager (PIN: ${MOK_PIN} if staged by Kushagra OS)."
+    exit 0
+fi
+
+print_pcr7_warning
+echo ""
+echo "Detected MOK Certificate : ${KEY_FILE}"
+echo "Current Secure Boot State: ${SB_STATE}"
+echo "One-Time Numeric PIN     : ${MOK_PIN}"
+echo "Why numeric PIN? UEFI MOK Manager always uses a US-QWERTY keymap; using digits"
+echo "(${MOK_PIN}) ensures reliable input across Indian and non-US keyboard layouts."
+echo ""
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[DRY-RUN] mokutil --timeout -1"
+    echo "[DRY-RUN] mokutil --generate-hash=${MOK_PIN} > <temp-hash-file>"
+    echo "[DRY-RUN] mokutil --hash-file <temp-hash-file> --import ${KEY_FILE}"
+    echo "[DRY-RUN] No UEFI NVRAM variables were modified."
+    exit 0
+fi
+
+if [ "$YES_FLAG" -ne 1 ]; then
+    if [ ! -t 0 ]; then
+        echo "[BLOCKED] Non-interactive execution requires '--yes' to acknowledge the BitLocker/LUKS TPM PCR 7 warning." >&2
+        exit 1
+    fi
+    reply=""
+    read -r -p "Have you backed up BitLocker/LUKS recovery keys and wish to stage MOK enrollment? [y/N]: " reply
+    case "$reply" in
+        [Yy]|[Yy][Ee][Ss])
+            ;;
+        *)
+            echo "[ABORTED] MOK enrollment cancelled. No UEFI NVRAM changes were made."
+            exit 1
+            ;;
+    esac
+fi
+
+hash_file="$(mktemp)"
+chmod 0600 "$hash_file"
+TEMP_FILES+=("$hash_file")
+
+mokutil --generate-hash="${MOK_PIN}" > "$hash_file"
+if [ ! -s "$hash_file" ]; then
+    echo "[FAIL] Failed to generate MOK password hash with mokutil." >&2
+    exit 1
+fi
+
+run_root mokutil --timeout -1 >/dev/null 2>&1 || true
+run_root mokutil --hash-file "$hash_file" --import "$KEY_FILE"
+
+echo ""
+echo "================================================================================"
+echo "[PASS] MOK key staged for enrollment: ${KEY_FILE}"
+echo "================================================================================"
+echo "Next steps on reboot:"
+echo "  1. Reboot your PC ('systemctl reboot')."
+echo "  2. On the blue UEFI MOK Management screen, press any key to interrupt boot."
+echo "  3. Select: Enroll MOK  ->  Continue  ->  Yes"
+echo "  4. Enter numeric PIN: ${MOK_PIN}  (characters are hidden while typing)"
+echo "  5. Select: Reboot"
+echo ""
+echo "Reminder: Keep your Windows BitLocker 48-digit recovery key handy if dual-booting."

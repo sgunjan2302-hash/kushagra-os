@@ -254,6 +254,74 @@ else
     record_fail "Missing Creator/WinApps/Dual-Boot bridge scripts or ntsync configuration"
 fi
 
+# 15. Greenboot Self-Healing Rollback (Desktop-Safe, Offline Only)
+echo -n "Checking Greenboot rollback policy... "
+if rpm -q greenboot-default-health-checks >/dev/null 2>&1; then
+    record_fail "greenboot-default-health-checks installed (unsafe HTTP/DNS rollback checks forbidden on desktop)"
+elif [ -f "/etc/greenboot/greenboot.conf" ] \
+    && grep -q 'GREENBOOT_MAX_BOOT_ATTEMPTS=2' /etc/greenboot/greenboot.conf 2>/dev/null \
+    && [ -f "/usr/lib/systemd/system/greenboot-set-rollback-trigger.service.d/10-kushagra-shutdown.conf" ] \
+    && [ -x "/usr/lib/greenboot/check/required.d/10_kushagra_core.sh" ] \
+    && [ -x "/usr/lib/greenboot/check/required.d/20_kushagra_graphics.sh" ]; then
+    if grep -RqsE '\b(curl|wget|ping|nc|ncat|nslookup)\b' /usr/lib/greenboot/check/required.d/ 2>/dev/null; then
+        record_fail "Network probe detected inside /usr/lib/greenboot/check/required.d/"
+    else
+        record_pass "Greenboot-rs offline desktop policy verified (MAX_BOOT_ATTEMPTS=2, zero network checks)"
+    fi
+else
+    record_warn "Greenboot configuration or custom required health hooks incomplete"
+fi
+
+# 16. LVFS Firmware Monitor, DiscoverNotifier Replacement & Bazaar Verified Curation
+echo -n "Checking fwupd notifier & Bazaar Verified config... "
+if [ -x "/usr/libexec/kushagra-fwupd-notify" ] \
+    && [ -x "/usr/libexec/kushagra-flatpak-verified-init" ] \
+    && [ -f "/usr/share/kushagra-os/bazaar/config.yaml" ] \
+    && [ -f "/usr/share/kushagra-os/bazaar/blocklist.yaml" ] \
+    && [ -f "/etc/xdg/autostart/org.kde.discover.notifier.desktop" ] \
+    && grep -q 'Hidden=true' /etc/xdg/autostart/org.kde.discover.notifier.desktop 2>/dev/null; then
+    record_pass "Lightweight LVFS fwupd notifier active, DiscoverNotifier disabled, Bazaar Verified config staged"
+else
+    record_warn "LVFS firmware notifier, DiscoverNotifier override, or Bazaar config incomplete"
+fi
+
+# 17. Glass Guard 8 GB Baseline Calibration (< 3.5 GiB emergency RAM / software renderer only)
+echo -n "Checking Glass Guard v0.5.0 calibration... "
+if [ -x "/usr/bin/kushagra-glass-guard" ] \
+    && grep -q 'LOW_RAM_THRESHOLD_KB=3670016' /usr/bin/kushagra-glass-guard 2>/dev/null \
+    && grep -q 'lavapipe' /usr/bin/kushagra-glass-guard 2>/dev/null; then
+    record_pass "Glass Guard calibrated for 8 GB baseline (< 3.5 GiB emergency RAM / sw-GPU disable)"
+else
+    record_warn "kushagra-glass-guard missing < 3.5 GiB / lavapipe calibration"
+fi
+
+# 18. Registry Pull Mirror Scoping (Zero Wildcard)
+echo -n "Checking OCI registry mirror scoping... "
+r2_mirror_conf="/etc/containers/registries.conf.d/50-kushagra-mirror.conf"
+if [ -f "$r2_mirror_conf" ]; then
+    r2_active=$(grep -Ev '^[[:space:]]*(#|;|$)' "$r2_mirror_conf" 2>/dev/null || true)
+    if printf '%s\n' "$r2_active" | grep -q 'ghcr\.io' && ! printf '%s\n' "$r2_active" | grep -Eq 'location[[:space:]]*=[[:space:]]*"\*"'; then
+        record_pass "50-kushagra-mirror.conf scoped cleanly to ghcr.io"
+    else
+        record_fail "50-kushagra-mirror.conf invalid or contains wildcard location"
+    fi
+else
+    record_warn "50-kushagra-mirror.conf not present"
+fi
+
+# 19. NVIDIA MOK Tooling & Linux EAC v2 Posture
+echo -n "Checking MOK & Linux EAC v2 tooling... "
+if [ -x "/usr/bin/kushagra-mok-enroll" ] && [ -x "/usr/bin/kushagra-eac-status" ] && [ -x "/usr/bin/kushagra-eac-mode" ]; then
+    if [ -f "/usr/lib/bootc/kargs.d/10-kushagra-nvidia.toml" ] \
+        && [ -z "$(find /usr/lib/modules -maxdepth 4 \( -name 'nvidia.ko*' -o -name 'nvidia-open*' \) -print -quit 2>/dev/null || true)" ]; then
+        record_fail "10-kushagra-nvidia.toml blacklists nouveau inside a non-NVIDIA image"
+    else
+        record_pass "kushagra-mok-enroll & Linux EAC v2 tools ready; nouveau/NVIDIA kargs match image flavor"
+    fi
+else
+    record_fail "Missing kushagra-mok-enroll, kushagra-eac-status, or kushagra-eac-mode"
+fi
+
 echo "================================================================================"
 echo "Health Verification Summary: PASS: $pass_count | WARN: $warn_count | FAIL: $fail_count"
 echo "================================================================================"

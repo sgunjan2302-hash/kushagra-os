@@ -84,7 +84,16 @@ for cfg in \
     /etc/skel/.config/kglobalshortcutsrc \
     /etc/skel/.config/fcitx5/profile \
     /etc/skel/.config/plasma-welcomerc \
-    /etc/skel/.config/ksplashrc; do
+    /etc/skel/.config/ksplashrc \
+    /etc/greenboot/greenboot.conf \
+    /usr/lib/systemd/system/greenboot-set-rollback-trigger.service.d/10-kushagra-shutdown.conf \
+    /etc/containers/registries.conf.d/50-kushagra-mirror.conf \
+    /usr/share/kushagra-os/bazaar/config.yaml \
+    /usr/share/kushagra-os/bazaar/blocklist.yaml \
+    /usr/lib/systemd/system/kushagra-flatpak-verified-init.service \
+    /usr/lib/systemd/user/kushagra-fwupd-notify.service \
+    /usr/lib/systemd/user/kushagra-fwupd-notify.timer \
+    /usr/lib/systemd/user-preset/85-kushagra-dx.preset; do
     if [ -f "$cfg" ]; then
         chmod 0644 "$cfg"
     fi
@@ -125,6 +134,17 @@ for bin in \
     /usr/libexec/k-ai-krunner \
     /usr/libexec/kushagra-resolve-setup \
     /usr/libexec/kushagra-winapps-setup \
+    /usr/libexec/kushagra-dualboot-grub \
+    /usr/libexec/kushagra-flatpak-verified-init \
+    /usr/libexec/kushagra-fwupd-notify \
+    /usr/bin/kushagra-mok-enroll \
+    /usr/bin/kushagra-eac-status \
+    /usr/bin/kushagra-eac-mode \
+    /usr/lib/greenboot/check/required.d/10_kushagra_core.sh \
+    /usr/lib/greenboot/check/required.d/20_kushagra_graphics.sh \
+    /usr/lib/greenboot/check/wanted.d/10_kushagra_desktop_sanity.sh \
+    /usr/lib/greenboot/red.d/10_kushagra_failure_log.sh \
+    /usr/lib/greenboot/green.d/10_kushagra_boot_ok.sh \
     /usr/lib/systemd/system-generators/kushagra-live-plymouth-generator; do
     if [ -f "$bin" ]; then
         chmod 0755 "$bin"
@@ -140,11 +160,46 @@ fi
 # Strictly keep USBGuard opt-in (disabled by default until HID whitelist generated via ujust setup-usbguard)
 systemctl disable usbguard.service 2>/dev/null || true
 
+# Wire Bazaar Verified Flathub config + hide Flatpak VS Code (DX ships native code RPM)
+mkdir -p /etc/bazaar /usr/share/ublue-os/bazaar
+if [ -f /usr/share/kushagra-os/bazaar/config.yaml ]; then
+    cp -f /usr/share/kushagra-os/bazaar/config.yaml /etc/bazaar/config.yaml
+    cp -f /usr/share/kushagra-os/bazaar/config.yaml /usr/share/ublue-os/bazaar/main.yaml
+    chmod 0644 /etc/bazaar/config.yaml /usr/share/ublue-os/bazaar/main.yaml
+fi
+if [ -f /usr/share/kushagra-os/bazaar/blocklist.yaml ]; then
+    cp -f /usr/share/kushagra-os/bazaar/blocklist.yaml /etc/bazaar/blocklist.yaml
+    chmod 0644 /etc/bazaar/blocklist.yaml
+fi
+
+# Disable DiscoverNotifier autostart (KDE Bug 509180 RAM leak & Bug 522169 fwupd hang);
+# replaced by lightweight kushagra-fwupd-notify.timer
+mkdir -p /etc/xdg/autostart
+cat <<'EOF' > /etc/xdg/autostart/org.kde.discover.notifier.desktop
+[Desktop Entry]
+Type=Application
+Name=Discover Notifier
+Hidden=true
+NoDisplay=true
+EOF
+chmod 0644 /etc/xdg/autostart/org.kde.discover.notifier.desktop
+
+# Keep nouveau unblacklisted in base/DX images lacking NVIDIA kernel modules;
+# recipe-nvidia.yml / recipe-dx-nvidia.yml install NVIDIA akmods and copy 10-kushagra-nvidia.toml before initramfs.
+if [ -z "$(find /usr/lib/modules -maxdepth 4 \( -name 'nvidia.ko*' -o -name 'nvidia-open*' \) -print -quit 2>/dev/null || true)" ]; then
+    rm -f /usr/lib/bootc/kargs.d/10-kushagra-nvidia.toml
+fi
+
 # Enable K-AI lazy inference socket globally (0 MB idle model RAM; never enable k-ai-engine.service directly)
+# and wire v0.5.0 Verified Flathub + LVFS firmware timer
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --global enable k-ai-engine.socket 2>/dev/null || true
     systemctl --global disable k-ai-engine.service 2>/dev/null || true
     systemctl enable kushagra-dualboot-detect.service 2>/dev/null || true
+    systemctl enable kushagra-flatpak-verified-init.service 2>/dev/null || true
+    systemctl unmask fwupd.service 2>/dev/null || true
+    systemctl enable fwupd.service fwupd-refresh.timer 2>/dev/null || true
+    systemctl --global enable kushagra-fwupd-notify.timer 2>/dev/null || true
 fi
 
 # Refresh desktop & MIME association caches for .exe/.msi WinRun and K-Installer handlers

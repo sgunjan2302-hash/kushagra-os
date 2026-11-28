@@ -1,202 +1,19 @@
 #!/usr/bin/env python3
-"""Privileged K-Installer storage scanner and Anaconda Kickstart runner (via pkexec)."""
+"""Privileged K-Installer storage scanner and offline native bootc deployment backend (via pkexec)."""
 
 import json
 import os
-import re
 import shutil
-import subprocess
 import sys
-import time
+import traceback
 
 sys.path.insert(0, "/usr/share/kushagra-os/installer")
-import ks_builder
+import bootc_deploy
 import storage_probe
 
 RUN_DIR = "/run/kushagra-installer"
-KS_PATH = os.path.join(RUN_DIR, "install.ks")
 LOG_PATH = os.path.join(RUN_DIR, "install.log")
-ANACONDA_LOGS = [
-    "/tmp/anaconda.log",
-    "/tmp/packaging.log",
-    "/tmp/storage.log",
-]
-
-SOFTWARE_PROGRESS_RE = re.compile(r"installing software\s+(\d+)%", re.IGNORECASE)
-
-MILESTONE_RULES = [
-    (12, "Initializing storage & hardware layout...", ("probing storage", "configuring storage", "initializing storage")),
-    (25, "Creating Btrfs subvolumes & formatting target...", ("executing storage tasks", "creating btrfs", "creating ext4", "creating efi", "formatting")),
-    (35, "Deploying Kushagra OS immutable system image...", ("setting up the installation source", "setting up installation source", "installing software", "deploying live", "copying live")),
-    (89, "Staging kernel, initramfs & UEFI GRUB2 bootloader...", ("running post-installation", "performing post-installation", "installing boot loader")),
-    (95, "Configuring Stage 2 OOBE handoff & security seals...", ("kushagra_post: arming stage 2 oobe", "kushagra-oobe-pending")),
-]
-
-RSYNC_WRAPPER_SCRIPT = r"""#!/usr/bin/env python3
-'''Transient rsync wrapper for Anaconda liveimg transfers into sysroot.'''
-
-import errno
-import os
-import stat
-import subprocess
-import sys
-
-REAL_RSYNC = "/usr/bin/rsync"
-
-VALUE_LONG_OPTS = {
-    "--rsh", "--rsync-path", "--suffix", "--backup-dir", "--compare-dest",
-    "--copy-dest", "--link-dest", "--chmod", "--chown", "--usermap",
-    "--groupmap", "--exclude", "--exclude-from", "--include",
-    "--include-from", "--files-from", "--filter", "--temp-dir",
-    "--partial-dir", "--log-file", "--log-file-format", "--out-format",
-    "--bwlimit", "--timeout", "--contimeout", "--address", "--port",
-    "--sockopts", "--password-file", "--block-size", "--modify-window",
-    "--max-size", "--min-size", "--max-delete", "--info", "--debug",
-    "--iconv", "--skip-compress", "--compress-level", "--checksum-choice",
-    "--csum-choice", "--stop-after", "--stop-at", "--remote-option",
-    "--early-input", "--max-alloc", "--outbuf",
-}
-VALUE_SHORT_OPTS = set("BefMT")
-IGNORED_XATTR_ERRNOS = {
-    code
-    for name in ("ENODATA", "ENOTSUP", "EOPNOTSUPP", "ENOENT")
-    if (code := getattr(errno, name, None)) is not None
-}
-
-
-def _strip_xattr_flags(args: list[str]) -> tuple[list[str], list[str]]:
-    '''Return (filtered_args, positional_args) with -X/--xattrs stripped.'''
-    filtered: list[str] = []
-    positional: list[str] = []
-    after_double_dash = False
-    expect_value = False
-
-    for arg in args:
-        if after_double_dash:
-            filtered.append(arg)
-            positional.append(arg)
-            continue
-
-        if expect_value:
-            filtered.append(arg)
-            expect_value = False
-            continue
-
-        if arg == "--":
-            after_double_dash = True
-            filtered.append(arg)
-            continue
-
-        if arg.startswith("--"):
-            if arg == "--xattrs":
-                continue
-            filtered.append(arg)
-            if "=" not in arg and arg in VALUE_LONG_OPTS:
-                expect_value = True
-            continue
-
-        if arg.startswith("-") and arg != "-":
-            kept: list[str] = []
-            idx = 1
-            while idx < len(arg):
-                ch = arg[idx]
-                if ch in VALUE_SHORT_OPTS:
-                    kept.append(arg[idx:])
-                    if idx == len(arg) - 1:
-                        expect_value = True
-                    break
-                if ch != "X":
-                    kept.append(ch)
-                idx += 1
-            if kept:
-                filtered.append("-" + "".join(kept))
-            continue
-
-        filtered.append(arg)
-        positional.append(arg)
-
-    return filtered, positional
-
-
-def _is_sysroot_target(path: str, sysroots: set[str]) -> bool:
-    norm = os.path.normpath(path)
-    return any(norm == sr or norm.startswith(sr + os.sep) for sr in sysroots)
-
-
-def _prepare_target_dirs(dst_root: str) -> None:
-    '''Pre-create atomic/boot directories needed by Anaconda post tasks.'''
-    os.makedirs(os.path.join(dst_root, "boot", "grub2"), exist_ok=True)
-    os.makedirs(os.path.join(dst_root, "var", "lib", "os-prober", "mount"), exist_ok=True)
-
-    roothome = os.path.join(dst_root, "var", "roothome")
-    os.makedirs(roothome, mode=0o700, exist_ok=True)
-    os.chmod(roothome, 0o700)
-
-    vartmp = os.path.join(dst_root, "var", "tmp")
-    os.makedirs(vartmp, mode=0o1777, exist_ok=True)
-    os.chmod(vartmp, 0o1777)
-
-    for subdir in ("log", "lib", "opt", "srv", "mnt", "spool", "cache"):
-        os.makedirs(os.path.join(dst_root, "var", subdir), exist_ok=True)
-
-
-def _copy_usr_capabilities(src_root: str, dst_root: str) -> None:
-    '''Preserve security.capability xattrs across /usr regular files.'''
-    src_usr = os.path.join(src_root, "usr")
-    dst_usr = os.path.join(dst_root, "usr")
-    if not (os.path.isdir(src_usr) and os.path.isdir(dst_usr)):
-        return
-
-    for dirpath, _dirnames, filenames in os.walk(src_usr, followlinks=False):
-        rel_dir = os.path.relpath(dirpath, src_usr)
-        dst_dir_path = dst_usr if rel_dir == "." else os.path.join(dst_usr, rel_dir)
-        for name in filenames:
-            src_file = os.path.join(dirpath, name)
-            dst_file = os.path.join(dst_dir_path, name)
-            try:
-                src_st = os.lstat(src_file)
-                if not stat.S_ISREG(src_st.st_mode):
-                    continue
-                cap = os.getxattr(src_file, "security.capability", follow_symlinks=False)
-                dst_st = os.lstat(dst_file)
-                if not stat.S_ISREG(dst_st.st_mode):
-                    continue
-                os.setxattr(dst_file, "security.capability", cap, follow_symlinks=False)
-            except OSError as exc:
-                if exc.errno in IGNORED_XATTR_ERRNOS:
-                    continue
-                raise
-
-
-def main() -> int:
-    args = sys.argv[1:]
-    env_sysroot = (os.environ.get("ANACONDA_SYSROOT") or "/mnt/sysroot").strip() or "/mnt/sysroot"
-    sysroots = {"/mnt/sysroot", os.path.normpath(env_sysroot)}
-
-    filtered_args, positional = _strip_xattr_flags(args)
-    targeting_sysroot = len(positional) >= 2 and _is_sysroot_target(positional[-1], sysroots)
-
-    if not targeting_sysroot:
-        os.execv(REAL_RSYNC, [REAL_RSYNC, *args])
-
-    res = subprocess.run([REAL_RSYNC, *filtered_args], check=False)
-    if res.returncode != 0:
-        return res.returncode
-
-    dst_root = positional[-1].rstrip("/") or "/"
-    _prepare_target_dirs(dst_root)
-    for src_arg in positional[:-1]:
-        src_root = src_arg.rstrip("/") or "/"
-        _copy_usr_capabilities(src_root, dst_root)
-
-    sys.stdout.flush()
-    sys.stderr.flush()
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-"""
+FALLBACK_LOG_PATH = "/tmp/kushagra-install.log"
 
 
 def emit_progress(percent: int, stage: str, log_lines=None) -> None:
@@ -217,199 +34,56 @@ def run_install(payload: dict) -> int:
         print(f"Target validation failed: {exc}", file=sys.stderr)
         return 1
 
-    os.makedirs(RUN_DIR, exist_ok=True)
+    os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+    last_percent = 3
+    install_ok = False
+    err_msg = ""
 
-    # Unmount only the single user-selected target partition if somehow automounted
-    if target.get("kind") == "partition" and target.get("partPath"):
-        subprocess.run(["umount", target["partPath"]], capture_output=True, check=False)
-
-    # Initialize GPT cleanly on uninitialized/blank disks before invoking Anaconda
-    has_existing_parts = any(s.get("kind") == "partition" for s in disk.get("segments", []))
-    if (disk.get("pttype") in ("", "none", "uninitialized") or target.get("needsInitGpt")) and not has_existing_parts:
-        emit_progress(4, f"Initializing GPT partition table on {disk['path']}...", [
-            f"Initializing GPT label on blank disk {disk['path']}",
-        ])
-        gpt_res = subprocess.run(
-            ["parted", "-s", disk["path"], "mklabel", "gpt"],
-            capture_output=True, text=True, check=False,
-        )
-        if gpt_res.returncode != 0:
-            err = (gpt_res.stderr or gpt_res.stdout or "parted mklabel gpt failed").strip()
-            print(f"Failed to initialize GPT on {disk['path']}: {err}", file=sys.stderr)
-            return 1
-        subprocess.run(["udevadm", "settle"], capture_output=True, check=False)
-
-    ks_text = ks_builder.build_kickstart(target)
-    with open(KS_PATH, "w", encoding="utf-8") as fp:
-        fp.write(ks_text)
-    os.chmod(KS_PATH, 0o600)
-
-    emit_progress(5, f"Validated target {target['displayName']} (EFI {target.get('espPath') or 'new'})", [
-        f"Target: {target['displayName']} [{target['kind']}]",
-        f"Preserved Disk Neighbors: {disk['path']} ({disk['model']})",
-    ])
-
-    # Clear stale non-running cleanup state if present without interrupting active installer
-    if shutil.which("anaconda-cleanup"):
-        subprocess.run(["anaconda-cleanup"], capture_output=True, check=False)
-
-    # Preserve session env vars across pkexec & temporary permissive SELinux toggle cleanly
-    env = os.environ.copy()
-    pkexec_uid = env.get("PKEXEC_UID", "").strip()
-    if pkexec_uid.isdigit():
-        runtime_dir = f"/run/user/{pkexec_uid}"
-        if not env.get("XDG_RUNTIME_DIR"):
-            env["XDG_RUNTIME_DIR"] = runtime_dir
-        bus_sock = os.path.join(env["XDG_RUNTIME_DIR"], "bus")
-        if not env.get("DBUS_SESSION_BUS_ADDRESS") and os.path.exists(bus_sock):
-            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_sock}"
-    env.setdefault("ANACONDA_PRODUCTNAME", "Kushagra OS")
-    env.setdefault("ANACONDA_PRODUCTVERSION", "44")
-    env.setdefault("ANACONDA_ISFINAL", "true")
-
-    wrapper_bin_dir = os.path.join(RUN_DIR, "bin")
-    rsync_wrapper_path = os.path.join(wrapper_bin_dir, "rsync")
-    existing_path = env.get("PATH", "")
-    path_parts = [wrapper_bin_dir, "/sbin", "/usr/sbin"]
-    if existing_path:
-        path_parts.append(existing_path)
-    env["PATH"] = ":".join(path_parts)
-
-    # Track current log byte offsets so we only stream new lines generated during this run
-    offsets = {}
-    for lp in ANACONDA_LOGS:
-        offsets[lp] = os.path.getsize(lp) if os.path.exists(lp) else 0
-
-    cmd = [
-        "/usr/bin/python3",
-        "/usr/share/kushagra-os/installer/anaconda_runner.py",
-        "--cmdline",
-        "--profile",
-        "kushagra-os",
-        "--kickstart",
-        KS_PATH,
-    ]
-    emit_progress(8, "Starting Anaconda non-interactive installation backend...", [f"Command: {' '.join(cmd)}"])
-
-    prev_selinux = ""
-    ret = 1
-    percent = 10
     try:
-        os.makedirs(wrapper_bin_dir, exist_ok=True)
-        with open(rsync_wrapper_path, "w", encoding="utf-8", newline="\n") as rfp:
-            rfp.write(RSYNC_WRAPPER_SCRIPT)
-        os.chmod(rsync_wrapper_path, 0o755)
+        with open(LOG_PATH, "w", encoding="utf-8", newline="\n") as log_fp:
+            def emit_and_log(percent: int, stage: str, log_lines=None) -> None:
+                nonlocal last_percent
+                if percent >= 0:
+                    last_percent = max(last_percent, int(percent))
+                lines = [str(ln) for ln in (log_lines or []) if str(ln).strip()]
+                if stage:
+                    log_fp.write(f"[{last_percent}%] {stage}\n")
+                for ln in lines:
+                    log_fp.write(f"{ln}\n")
+                log_fp.flush()
+                emit_progress(percent, stage, lines)
 
-        if os.path.exists("/usr/sbin/getenforce") and os.path.exists("/usr/sbin/setenforce"):
-            res_se = subprocess.run(["/usr/sbin/getenforce"], capture_output=True, text=True, check=False)
-            prev_selinux = res_se.stdout.strip()
-            if prev_selinux == "Enforcing":
-                subprocess.run(["/usr/sbin/setenforce", "0"], capture_output=True, check=False)
+            emit_and_log(3, f"Validated target {target['displayName']} (EFI {target.get('espPath') or 'new'})", [
+                f"Target: {target['displayName']} [{target['kind']}]",
+                f"Disk: {disk['path']} ({disk['model']})",
+            ])
 
-        with open(LOG_PATH, "w", encoding="utf-8") as log_fp:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                text=True,
-                bufsize=1,
-            )
-            os.set_blocking(proc.stdout.fileno(), False)
-
-            stage = "Preparing Anaconda installer modules..."
-            last_heartbeat = time.monotonic()
-            last_creep = last_heartbeat
-
-            while True:
-                new_lines = []
-                try:
-                    chunk = proc.stdout.read()
-                    if chunk:
-                        for line in chunk.splitlines():
-                            clean = line.strip()
-                            if clean:
-                                log_fp.write(clean + "\n")
-                                new_lines.append(clean)
-                except BlockingIOError:
-                    pass
-
-                for lp in ANACONDA_LOGS:
-                    if not os.path.exists(lp):
-                        continue
-                    try:
-                        sz = os.path.getsize(lp)
-                        prev = offsets.get(lp, 0)
-                        if sz > prev:
-                            with open(lp, "r", encoding="utf-8", errors="replace") as afp:
-                                afp.seek(prev)
-                                for line in afp.read().splitlines():
-                                    clean = line.strip()
-                                    if clean:
-                                        log_fp.write(f"[{os.path.basename(lp)}] {clean}\n")
-                                        new_lines.append(clean)
-                            offsets[lp] = sz
-                    except Exception:
-                        pass
-
-                for line in new_lines:
-                    low = line.lower()
-                    sw_match = SOFTWARE_PROGRESS_RE.search(low)
-                    if sw_match:
-                        sw_pct = max(0, min(100, int(sw_match.group(1))))
-                        mapped = 35 + int(round((sw_pct / 100.0) * (88 - 35)))
-                        if mapped > percent:
-                            percent = mapped
-                        if percent <= 88:
-                            stage = f"Deploying Kushagra OS immutable system image ({sw_pct}%)..."
-                        continue
-
-                    for target_pct, target_stage, keywords in MILESTONE_RULES:
-                        if target_pct > percent and any(k in low for k in keywords):
-                            percent = target_pct
-                            stage = target_stage
-
-                now = time.monotonic()
-                if new_lines or (now - last_heartbeat >= 2.0):
-                    if not new_lines and 35 <= percent < 84 and (now - last_creep >= 8.0):
-                        percent += 1
-                        last_creep = now
-                    emit_progress(percent, stage, new_lines[-40:])
-                    log_fp.flush()
-                    last_heartbeat = now
-
-                ret = proc.poll()
-                if ret is not None:
-                    try:
-                        rem = proc.stdout.read()
-                        if rem:
-                            trail = [ln.strip() for ln in rem.splitlines() if ln.strip()]
-                            for ln in trail:
-                                log_fp.write(ln + "\n")
-                            if trail:
-                                emit_progress(percent, stage, trail[-40:])
-                    except Exception:
-                        pass
-                    break
-
-                time.sleep(0.5)
-
-        if ret != 0 and os.path.exists(LOG_PATH):
             try:
-                shutil.copy2(LOG_PATH, "/tmp/kushagra-install.log")
+                bootc_deploy.deploy_system(target, emit_and_log)
+                install_ok = True
+            except Exception as exc:
+                err_msg = str(exc).strip() or exc.__class__.__name__
+                log_fp.write(f"FATAL: {err_msg}\n")
+                log_fp.write(traceback.format_exc())
+                log_fp.flush()
+
+        if not install_ok:
+            try:
+                shutil.copy2(LOG_PATH, FALLBACK_LOG_PATH)
             except Exception:
                 pass
+            emit_progress(
+                last_percent,
+                f"Installation failed: {err_msg}",
+                [f"FATAL: {err_msg}", f"Inspect {FALLBACK_LOG_PATH} for full diagnostics."],
+            )
+            print(f"Installation failed: {err_msg}", file=sys.stderr)
+            return 1
     finally:
-        if prev_selinux == "Enforcing" and os.path.exists("/usr/sbin/setenforce"):
-            subprocess.run(["/usr/sbin/setenforce", "1"], capture_output=True, check=False)
         shutil.rmtree(RUN_DIR, ignore_errors=True)
 
-    if ret != 0:
-        emit_progress(percent, f"Anaconda exited with error code {ret}", [f"FATAL: anaconda failed with code {ret}. Inspect /tmp/kushagra-install.log and /tmp/anaconda.log."])
-        return ret
-
     emit_progress(100, "Kushagra OS installed cleanly! Ready to restart into Setup Wizard.", [
-        "Installation completed with exit code 0.",
+        "Offline native bootc deployment completed with exit code 0.",
         "Stage 2 OOBE (/var/lib/kushagra-oobe-pending) is armed for first reboot.",
     ])
     return 0

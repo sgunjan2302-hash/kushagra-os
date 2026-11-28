@@ -197,7 +197,7 @@ Window {
                         font.letterSpacing: 1.6
                     }
                     Text {
-                        text: isHindi ? "स्टेज 1 इंस्टॉलर · ड्यूल-बूट सुरक्षित (Btrfs + UEFI)" : "STAGE 1 OEM INSTALLER · DUAL-BOOT SAFE (BTRFS + UEFI)"
+                        text: isHindi ? "स्टेज 1 इंस्टॉलर · ऑफ़लाइन bootc + Btrfs + UEFI ड्यूल-बूट सुरक्षित" : "STAGE 1 OEM INSTALLER · OFFLINE BOOTC + BTRFS + UEFI"
                         color: "#94A3B8"
                         font.pixelSize: 11
                         font.letterSpacing: 1.1
@@ -257,9 +257,29 @@ Window {
                     }
                     Text {
                         text: isHindi
-                              ? "आप अभी लाइव USB से चल रहे हैं। हार्ड ड्राइव पर सुरक्षित इंस्टॉल शुरू करें, या पहले लाइव डेस्कटॉप आज़माएं।"
-                              : "You are running the live USB environment. Install Kushagra OS safely alongside Windows, or explore the desktop first."
+                              ? "आप अभी लाइव USB से चल रहे हैं। हार्ड ड्राइव पर सुरक्षित ऑफ़लाइन bootc इंस्टॉल शुरू करें, या पहले लाइव डेस्कटॉप आज़माएं।"
+                              : "You are running the live USB environment. Deploy Kushagra OS offline via bootc safely alongside Windows, or explore the desktop first."
                         color: "#CBD5E1"; font.pixelSize: 15; wrapMode: Text.WordWrap; Layout.fillWidth: true
+                    }
+
+                    // Non-blocking Legacy RAM Advisory (< ~7.2 GiB / under 8 GB baseline)
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.max(40, legacyBanner0Lbl.implicitHeight + 16)
+                        radius: 10
+                        visible: installerBackend.legacyRamAdvisory
+                        color: "#33F59E0B"
+                        border.color: "#F59E0B"
+                        Text {
+                            id: legacyBanner0Lbl
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.margins: 12
+                            wrapMode: Text.WordWrap
+                            color: "#FDE68A"; font.pixelSize: 12
+                            text: isHindi
+                                  ? ("लेगेसी हार्डवेयर सलाह (" + installerBackend.ramGib.toFixed(1) + " GiB RAM मिली): बेहतर मल्टीटास्किंग और लोकल AI के लिए 8 GB+ RAM की सलाह दी जाती है। ZRAM और लो-रैम मोड के साथ इंस्टॉलेशन पूरी तरह अनुमत है।")
+                                  : ("Legacy Advisory (" + installerBackend.ramGib.toFixed(1) + " GiB RAM detected): Kushagra OS recommends 8 GB+ RAM for full multitasking & local AI. Installation remains fully allowed with ZRAM + Low-RAM optimizations.")
+                        }
                     }
 
                     RowLayout {
@@ -395,6 +415,26 @@ Window {
                             wrapMode: Text.WordWrap
                             color: "#FDE68A"; font.pixelSize: 12
                             text: installerBackend.scanError
+                        }
+                    }
+
+                    // Non-blocking Legacy RAM Advisory (< ~7.2 GiB / under 8 GB baseline)
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.max(38, legacyBanner1Lbl.implicitHeight + 14)
+                        radius: 10
+                        visible: installerBackend.legacyRamAdvisory
+                        color: "#33F59E0B"
+                        border.color: "#F59E0B"
+                        Text {
+                            id: legacyBanner1Lbl
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.margins: 12
+                            wrapMode: Text.WordWrap
+                            color: "#FDE68A"; font.pixelSize: 12
+                            text: isHindi
+                                  ? ("लेगेसी हार्डवेयर सलाह (" + installerBackend.ramGib.toFixed(1) + " GiB RAM): 8 GB+ RAM अनुशंसित है; ZRAM के साथ 4 GB+ सिस्टम पर भी इंस्टॉल जारी रख सकते हैं।")
+                                  : ("Legacy Advisory (" + installerBackend.ramGib.toFixed(1) + " GiB RAM): 8 GB+ RAM is recommended; you may proceed cleanly with ZRAM + Low-RAM survival tuning.")
                         }
                     }
 
@@ -562,12 +602,13 @@ Window {
 
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 220
+                        Layout.preferredHeight: Math.max(210, summaryCol.implicitHeight + 44)
                         radius: 16
                         color: "#14FFFFFF"
                         border.color: "#2EFFFFFF"
 
                         ColumnLayout {
+                            id: summaryCol
                             anchors.fill: parent
                             anchors.margins: 22
                             spacing: 10
@@ -582,21 +623,25 @@ Window {
                             }
                             Text {
                                 text: root.selectedTarget && root.selectedTarget.kind === "partition"
-                                      ? (isHindi ? "• मोड: केवल चुना हुआ सिंगल पार्टीशन Btrfs में रीक्लेम होगा (clearpart --none, अन्य सभी पार्टीशन सुरक्षित)।" : "• Mode: Reclaim ONLY this single partition as Btrfs (root, var, home). All neighboring partitions untouched.")
-                                      : (isHindi ? "• मोड: खाली जगह (Unallocated) में 1 GB /boot + Btrfs (root, var, home) बनेगा। Windows व अन्य डेटा सुरक्षित रहेंगे।" : "• Mode: Automatic 1 GB ext4 /boot + Btrfs (root, var, home) in Unallocated space. All existing OS partitions preserved.")
+                                      ? (isHindi ? "• मोड: केवल चुना हुआ सिंगल पार्टीशन Btrfs (var/home सबवॉल्यूम) में फॉर्मेट होगा और ऑफ़लाइन bootc इमेज डिप्लॉय होगी। अन्य सभी पार्टीशन सुरक्षित रहेंगे।" : "• Mode: Reclaim ONLY this single partition as Btrfs (var/home subvolume) with offline native bootc deployment. All neighboring partitions untouched.")
+                                      : (isHindi ? "• मोड: खाली जगह (Unallocated) में 1 GiB ext4 /boot + Btrfs (var/home सबवॉल्यूम) बनेगा और ऑफ़लाइन bootc इमेज डिप्लॉय होगी। Windows व अन्य डेटा सुरक्षित रहेंगे।" : "• Mode: Automatic 1 GiB ext4 /boot + Btrfs (var/home subvolume) inside Unallocated space with offline native bootc deployment. Existing OS partitions preserved.")
                                 color: "#CBD5E1"; font.pixelSize: 13; wrapMode: Text.WordWrap; Layout.fillWidth: true
                             }
                             Text {
                                 text: root.selectedTarget && root.selectedTarget.espPath
-                                      ? ("• EFI System Partition: " + root.selectedTarget.espPath + " (--noformat · Windows Boot Manager preserved)")
-                                      : "• EFI System Partition: New 512 MB FAT32 EFI partition will be created"
-                                color: "#38BDF8"; font.pixelSize: 13
+                                      ? (isHindi
+                                         ? ("• EFI सिस्टम पार्टीशन: " + root.selectedTarget.espPath + " (फॉर्मेट नहीं होगा · Windows Boot Manager SHA256 सत्यापन के साथ सुरक्षित)")
+                                         : ("• EFI System Partition: " + root.selectedTarget.espPath + " (preserved · Windows Boot Manager SHA256-verified + GRUB2 custom.cfg)"))
+                                      : (isHindi
+                                         ? "• EFI सिस्टम पार्टीशन: नया 512 MiB FAT32 EFI पार्टीशन बनेगा"
+                                         : "• EFI System Partition: New 512 MiB FAT32 EFI partition will be created")
+                                color: "#38BDF8"; font.pixelSize: 13; wrapMode: Text.WordWrap; Layout.fillWidth: true
                             }
                             Text {
                                 text: isHindi
                                       ? "• रीबूट के बाद: Stage 2 Kushagra Setup Wizard (kushagra-setup) आपका यूज़र अकाउंट बनाएगा।"
                                       : "• Post-Install Handoff: System boots directly into kushagra-setup (OOBE) to create your admin user."
-                                color: "#4ADE80"; font.pixelSize: 13
+                                color: "#4ADE80"; font.pixelSize: 13; wrapMode: Text.WordWrap; Layout.fillWidth: true
                             }
                         }
                     }
@@ -644,7 +689,7 @@ Window {
                               ? (isHindi ? "✓ इंस्टॉलेशन सफलतापूर्वक पूरा हुआ!" : "✓ Kushagra OS Installed Successfully!")
                               : (installerBackend.installError.length > 0
                                  ? (isHindi ? "इंस्टॉलेशन में त्रुटि आई" : "Installation Encountered an Error")
-                                 : (isHindi ? "Kushagra OS इंस्टॉल हो रहा है..." : "Installing Kushagra OS..."))
+                                 : (isHindi ? "Kushagra OS ऑफ़लाइन डिप्लॉय हो रहा है (bootc + Btrfs)..." : "Deploying Kushagra OS Offline (bootc + Btrfs)..."))
                         color: installerBackend.installSucceeded ? "#4ADE80" : (installerBackend.installError.length > 0 ? "#F87171" : "#FFFFFF")
                         font.pixelSize: 26; font.weight: Font.Bold
                     }
