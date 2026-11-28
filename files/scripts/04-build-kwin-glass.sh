@@ -54,6 +54,11 @@ BUILD_DEPS=(
     wayland-devel
     plasma-wayland-protocols-devel
     libepoxy-devel
+    libdrm-devel
+    mesa-libGL-devel
+    mesa-libEGL-devel
+    mesa-libgbm-devel
+    vulkan-loader-devel
 )
 
 DEPS_INSTALLED=0
@@ -187,7 +192,7 @@ chmod 0644 "${BACKEND_FILE}"
 
 # 4. Remove ALL newly added build/-devel/toolchain RPMs while protecting core OS runtime packages
 if command -v rpm >/dev/null 2>&1 && command -v dnf5 >/dev/null 2>&1 && [ -s "${PRE_RPMS}" ]; then
-    RUNTIME_KEEP_RE='^(jq|bash|glibc.*|systemd.*|kwin|kwin-libs|kwin-common|plasma-desktop|qt6-qtbase|qt6-qtbase-common|qt6-qtbase-gui|qt6-qtdeclarative|qt6-qtwayland|python3|vulkan-loader|libgomp|kdecoration|libplasma|libepoxy)$'
+    RUNTIME_KEEP_RE='^(jq|bash|glibc|glibc-common|glibc-all-langpacks|systemd|systemd-libs|systemd-udev|systemd-pam|systemd-resolved|systemd-oomd-defaults|kwin|kwin-libs|kwin-common|plasma-desktop|qt6-qtbase|qt6-qtbase-common|qt6-qtbase-gui|qt6-qtdeclarative|qt6-qtwayland|python3|vulkan-loader|libgomp|kdecoration|libplasma|libepoxy|libdrm|mesa-libGL|mesa-libEGL|mesa-libgbm)$'
     mapfile -t NEW_BUILD_RPMS < <(
         comm -13 "${PRE_RPMS}" <(rpm -qa --qf '%{NAME}\n' | sort -u) | \
         grep -E '(-devel$|-headers$|-static$|-rpm-macros$|^cmake$|^cmake-data$|^cmake-filesystem$|^ninja-build$|^extra-cmake-modules$|^gcc$|^gcc-c\+\+$|^cpp$|^binutils$|^git$|^git-core$|^perl-Git$|^gettext$|^doxygen$|^clang-libs$|^clang-resource-filesystem$|^graphviz.*|^gts$|^lasi$|^netpbm$|^poppler-glib$|^kde-qdoc-common$|^qt6-designer$|^qt6-doctools$|^qt6-linguist$|^qt6-qtbase-(ibase|odbc|postgresql)$|^qt6-qttools-.*|^libfbclient2$|^libpq$|^unixODBC$|^pkgconf.*|^annobin.*|^gcc-plugin-annobin$|^dwz$|^redhat-rpm-config$|^rhash$|^spdlog$|^make$)' | \

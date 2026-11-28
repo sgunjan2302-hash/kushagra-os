@@ -966,6 +966,9 @@ try:
             'libplasma-devel',
             'qt6-qtbase-private-devel',
             'plasma-wayland-protocols-devel',
+            'libdrm-devel',
+            'mesa-libgbm-devel',
+            'vulkan-loader-devel',
         ])
         and 'dnf5 remove' in glass_build_sh
         and 'jq|' in glass_build_sh
