@@ -1007,7 +1007,7 @@ def deploy_system(target: dict, emit_progress: ProgressCallback | None = None) -
     boot_uuid = _resolve_uuid(boot_dev) if boot_dev else None
     esp_uuid = _resolve_uuid(esp_dev)
 
-    _emit(emit, 20, "Mounting Btrfs sysroot & creating var/home subvolume...", [
+    _emit(emit_progress, 20, "Mounting Btrfs sysroot & creating var/home subvolume...", [
         f"UUIDs: root={root_uuid}, boot={boot_uuid or 'none'}, esp={esp_uuid}",
     ])
 
@@ -1034,25 +1034,25 @@ def deploy_system(target: dict, emit_progress: ProgressCallback | None = None) -
         ms_efi_dir = _find_microsoft_efi_dir(sysroot_efi)
         if ms_efi_dir:
             ms_efi_rel_name = os.path.basename(ms_efi_dir)
-            _emit(emit, 25, "Backing up Windows EFI (EFI/Microsoft) to RAM...", [
+            _emit(emit_progress, 25, "Backing up Windows EFI (EFI/Microsoft) to RAM...", [
                 f"Detected {ms_efi_dir}; backing up to RAM and recording SHA256 digests...",
             ])
             ms_manifest = _backup_windows_efi(ms_efi_dir, EFI_BACKUP_DIR)
-            _emit(emit, 27, "Windows EFI RAM backup & SHA256 manifest ready.", [
+            _emit(emit_progress, 27, "Windows EFI RAM backup & SHA256 manifest ready.", [
                 f"Protected {len(ms_manifest)} Windows EFI file(s) in RAM ({EFI_BACKUP_DIR}).",
             ])
 
         _run_bootc_to_filesystem(root_uuid, boot_uuid, target_imgref, emit_progress)
 
         os.makedirs(INSTALLED_MNT, mode=0o755, exist_ok=True)
-        _emit(emit, 82, "Mounting deployed ostree root via bootc install mount...", [
+        _emit(emit_progress, 82, "Mounting deployed ostree root via bootc install mount...", [
             f"Running bootc install mount --sysroot {SYSROOT_MNT} --latest {INSTALLED_MNT}",
         ])
         _run_checked(["bootc", "install", "mount", "--sysroot", SYSROOT_MNT, "--latest", INSTALLED_MNT])
 
         _configure_installed_sysroot(root_uuid, boot_uuid, esp_uuid, emit_progress)
 
-        _emit(emit, 90, "Unmounting /mnt/installed & writing update-safe GRUB2 custom.cfg...", [
+        _emit(emit_progress, 90, "Unmounting /mnt/installed & writing update-safe GRUB2 custom.cfg...", [
             f"Unmounting {INSTALLED_MNT}",
         ])
         _unmount_recursive(INSTALLED_MNT)
@@ -1063,21 +1063,21 @@ def deploy_system(target: dict, emit_progress: ProgressCallback | None = None) -
             "--efi-dir", sysroot_efi,
         ])
         grub_logs = [ln.strip() for ln in grub_res.stdout.splitlines() if ln.strip()]
-        _emit(emit, 92, "Configured update-safe GRUB2 dual-boot custom.cfg.", grub_logs)
+        _emit(emit_progress, 92, "Configured update-safe GRUB2 dual-boot custom.cfg.", grub_logs)
 
-        _emit(emit, 94, "Finalizing bootc deployment...", [
+        _emit(emit_progress, 94, "Finalizing bootc deployment...", [
             f"Running bootc install finalize {SYSROOT_MNT}",
         ])
         fin_res = _run_checked(["bootc", "install", "finalize", SYSROOT_MNT])
         fin_logs = [ln.strip() for ln in fin_res.stdout.splitlines() if ln.strip()]
         if fin_logs:
-            _emit(emit, 96, "Finalized bootc deployment.", fin_logs[-20:])
+            _emit(emit_progress, 96, "Finalized bootc deployment.", fin_logs[-20:])
 
         if ms_manifest:
             verify_dir = _find_microsoft_efi_dir(sysroot_efi) or os.path.join(sysroot_efi, "EFI", ms_efi_rel_name)
             _verify_or_restore_windows_efi(verify_dir, EFI_BACKUP_DIR, ms_manifest, emit_progress)
 
-        _emit(emit, 99, "Flushing caches & cleanly unmounting target sysroot...", [
+        _emit(emit_progress, 99, "Flushing caches & cleanly unmounting target sysroot...", [
             f"Syncing and unmounting {SYSROOT_MNT}",
         ])
         _unmount_recursive(SYSROOT_MNT)
