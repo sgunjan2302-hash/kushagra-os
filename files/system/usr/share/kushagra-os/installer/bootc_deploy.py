@@ -258,33 +258,63 @@ def _list_parted_state(disk_path: str) -> tuple[list[dict[str, int]], set[int]]:
 
 
 def _list_disk_partition_children(disk_path: str) -> list[dict]:
-    res = _run_checked(["lsblk", "-J", "-b", "-p", "-o", "PATH,KNAME,PARTN,TYPE", disk_path])
+    """Query lsblk JSON for all child partition rows on disk_path across tree/flat outputs."""
+    res = _run_checked(["lsblk", "-J", "-b", "-p", "-o", "NAME,PATH,KNAME,PARTN,TYPE", disk_path])
     data = json.loads(res.stdout or "{}")
     children: list[dict] = []
+
+    def _collect(item: dict) -> None:
+        if item.get("type") == "part":
+            children.append(item)
+        for ch in item.get("children") or []:
+            if isinstance(ch, dict):
+                _collect(ch)
+
     for dev in data.get("blockdevices", []):
-        for child in dev.get("children") or []:
-            if child.get("type") == "part":
-                children.append(child)
+        if isinstance(dev, dict):
+            _collect(dev)
     return children
 
 
 def _wait_for_partition_node(disk_path: str, part_num: int) -> str:
-    """Wait for udev to expose the block device node for GPT partition part_num."""
-    if shutil.which("partprobe"):
-        subprocess.run(["partprobe", disk_path], capture_output=True, check=False)
+    """Wait for kernel/udev to expose the block device node for GPT partition part_num."""
+    disk_kname = os.path.basename(os.path.realpath(disk_path))
+    disk_sys = f"/sys/class/block/{disk_kname}"
 
-    for _ in range(25):
+    for attempt in range(40):
+        if attempt in (0, 4, 12, 24):
+            if shutil.which("partprobe"):
+                subprocess.run(["partprobe", disk_path], capture_output=True, check=False)
+            if shutil.which("partx"):
+                subprocess.run(["partx", "-u", disk_path], capture_output=True, check=False)
+            if os.path.isdir(disk_sys):
+                subprocess.run(
+                    ["udevadm", "trigger", "--subsystem-match=block", f"--parent-match={disk_sys}", "--action=add"],
+                    capture_output=True,
+                    check=False,
+                )
         subprocess.run(["udevadm", "settle", "--timeout=5"], capture_output=True, check=False)
+
         for child in _list_disk_partition_children(disk_path):
+            dev_path = str(child.get("path") or "").strip()
             raw_pn = child.get("partn")
-            try:
-                if raw_pn is not None and int(raw_pn) == part_num:
-                    dev_path = str(child.get("path") or "").strip()
-                    if _is_block_device(dev_path):
-                        return dev_path
-            except (TypeError, ValueError):
-                continue
-        time.sleep(0.2)
+            pn_val: int | None = None
+            if raw_pn is not None:
+                try:
+                    pn_val = int(raw_pn)
+                except (TypeError, ValueError):
+                    pn_val = None
+            if pn_val is None:
+                kname = os.path.basename(str(child.get("kname") or dev_path))
+                part_sys = f"/sys/class/block/{kname}/partition"
+                if os.path.isfile(part_sys):
+                    try:
+                        pn_val = int(open(part_sys, "r", encoding="utf-8").read().strip())
+                    except Exception:
+                        pn_val = None
+            if pn_val == part_num and _is_block_device(dev_path):
+                return dev_path
+        time.sleep(0.25)
 
     raise RuntimeError(f"Timed out waiting for partition #{part_num} device node on {disk_path}.")
 
